@@ -44,6 +44,18 @@ export class ProxyServer {
 
       Logger.log(`📥 Received POST /v1/messages | model: ${req.body.model} | stream: ${!!req.body.stream} | prompt: "${userPromptSnippet.slice(0, 120)}"`, isVerbose);
 
+      // Fast HTTP 404 Intercept for Claude Code internal SUGGESTION MODE so it never stops main tool turns
+      if (userPromptSnippet.includes('[SUGGESTION MODE')) {
+        Logger.log('💡 [SUGGESTION MODE] Intercepted — returning HTTP 404 to preserve active tool loop');
+        res.status(404).json({
+          error: {
+            type: 'not_found_error',
+            message: 'Suggestion mode is disabled in nscc proxy to ensure continuous tool execution.',
+          },
+        });
+        return;
+      }
+
       // Check if Direct Fallback Mode is forced
       const isForceFallback = config.fallback.forceFallback;
 
@@ -52,7 +64,6 @@ export class ProxyServer {
         try {
           const upstreamResponse = await this.forwardToAnthropic(req);
 
-          // If OK (200..299), forward stream or JSON back directly
           if (upstreamResponse.ok) {
             Logger.log(`Upstream Anthropic HTTP ${upstreamResponse.status} OK (${Date.now() - startTime}ms)`, isVerbose);
             res.status(upstreamResponse.status);
@@ -77,11 +88,9 @@ export class ProxyServer {
             return;
           }
 
-          // If Rate Limited (429, 529, 403)
           if ([429, 529, 403].includes(upstreamResponse.status)) {
             Logger.log(`⚠️ Anthropic returned HTTP ${upstreamResponse.status} Rate Limit!`);
 
-            // Attempt cux rotation first
             if (config.cux.enabled && config.cux.autoRotateOnRateLimit && CuxManager.isInstalled()) {
               Logger.log('🔄 Triggering cux account rotation...');
               const rotated = CuxManager.rotate();
@@ -208,7 +217,6 @@ export class ProxyServer {
             }
 
             if (done) {
-              // Flush remaining trailing line trapped in buffer if present
               const trimmedBuf = buffer.trim();
               if (trimmedBuf.startsWith('data: ') && trimmedBuf !== 'data: [DONE]') {
                 try {
@@ -222,7 +230,6 @@ export class ProxyServer {
           }
         } else {
           const rawText = await openAIRes.text();
-          // Clean up 9Router trailing 'data: [DONE]' if concatenated to JSON body
           const cleanedText = rawText.replace(/data:\s*\[DONE\]\s*$/, '').trim();
           let openAIJson: any;
           try {

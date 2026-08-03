@@ -128,13 +128,9 @@ describe('Anthropic to OpenAI Protocol Translator', () => {
     expect(anthropicRes.type).toBe('message');
     expect(anthropicRes.role).toBe('assistant');
     expect(anthropicRes.stop_reason).toBe('tool_use');
-    expect(anthropicRes.content).toHaveLength(2);
-    expect(anthropicRes.content[0]).toEqual({ type: 'text', text: 'Here is your file list' });
-    expect(anthropicRes.content[1]).toEqual({
-      type: 'tool_use',
-      id: 'call_001',
-      name: 'Bash',
-      input: { command: 'pwd' },
-    });
+    expect(anthropicRes.content).toHaveLength(1);
+    expect(anthropicRes.content[0].type).toBe('tool_use');
+    expect(anthropicRes.content[0].name).toBe('Bash');
+    expect(anthropicRes.content[0].input).toEqual({ command: 'pwd' });
   });
 });

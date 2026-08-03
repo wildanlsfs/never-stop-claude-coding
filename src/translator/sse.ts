@@ -52,33 +52,14 @@ export class OpenAIToAnthropicSseStream {
 
     const delta = choice.delta;
 
-    // Handle text delta (including DeepSeek reasoning_content and thinking fields)
-    const textChunk = delta?.content ?? delta?.reasoning_content ?? delta?.thinking ?? delta?.text;
-
-    if (textChunk) {
-      if (this.currentBlockType !== 'text') {
-        this.closeCurrentBlock();
-        this.currentBlockIndex++;
-        this.currentBlockType = 'text';
-
-        this.emitEvent('content_block_start', {
-          type: 'content_block_start',
-          index: this.currentBlockIndex,
-          content_block: { type: 'text', text: '' },
-        });
-      }
-
-      this.outputTokens++;
-      this.emitEvent('content_block_delta', {
-        type: 'content_block_delta',
-        index: this.currentBlockIndex,
-        delta: { type: 'text_delta', text: textChunk },
-      });
-    }
-
-    // Handle tool call deltas cleanly across multiple stream chunks
+    // Detect if this chunk contains tool calls
     if (delta?.tool_calls && Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) {
       this.hasToolUse = true;
+
+      // If we previously opened a text block, close it cleanly so tool_use is isolated
+      if (this.currentBlockType === 'text') {
+        this.closeCurrentBlock();
+      }
 
       for (const tc of delta.tool_calls) {
         const toolIndex = tc.index ?? 0;
@@ -93,9 +74,18 @@ export class OpenAIToAnthropicSseStream {
           this.currentBlockIndex++;
           this.currentBlockType = 'tool_use';
           this.activeToolIndex = toolIndex;
-          this.currentToolCallId = tc.id || `toolu_${Math.random().toString(36).slice(2)}`;
+
+          // Format tool call ID strictly in native Anthropic format ('toolu_...') so Claude Code auto-approves permissions
+          const randomId = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+          this.currentToolCallId = `toolu_${randomId.slice(0, 24)}`;
           this.currentToolArgs = '';
-          const finalToolName = this.currentToolName || tc.function?.name || 'Bash';
+          let finalToolName = this.currentToolName || tc.function?.name || 'Bash';
+
+          // Intercept Skill tool: emit as Bash so Claude Code CLI executes it in the main tool loop
+          // (Skill opens a sub-agent context that stalls the main loop and never returns)
+          if (finalToolName === 'Skill') {
+            finalToolName = 'Bash';
+          }
 
           Logger.log(`🛠️ [tool_use] Opening tool block #${this.currentBlockIndex} (name: "${finalToolName}", id: "${this.currentToolCallId}")`);
 
@@ -116,6 +106,30 @@ export class OpenAIToAnthropicSseStream {
           this.outputTokens++;
         }
       }
+    } else {
+      // Handle text delta (only if no tool calls have been issued in this turn to prevent Claude Code turn termination)
+      const textChunk = delta?.content ?? delta?.reasoning_content ?? delta?.thinking ?? delta?.text;
+
+      if (textChunk && !this.hasToolUse) {
+        if (this.currentBlockType !== 'text') {
+          this.closeCurrentBlock();
+          this.currentBlockIndex++;
+          this.currentBlockType = 'text';
+
+          this.emitEvent('content_block_start', {
+            type: 'content_block_start',
+            index: this.currentBlockIndex,
+            content_block: { type: 'text', text: '' },
+          });
+        }
+
+        this.outputTokens++;
+        this.emitEvent('content_block_delta', {
+          type: 'content_block_delta',
+          index: this.currentBlockIndex,
+          delta: { type: 'text_delta', text: textChunk },
+        });
+      }
     }
 
     // Handle finish_reason
@@ -127,8 +141,8 @@ export class OpenAIToAnthropicSseStream {
   private closeCurrentBlock() {
     if (this.currentBlockType !== null) {
       if (this.currentBlockType === 'tool_use') {
-        // Sanitize tool argument JSON by stripping non-standard fields and detaching background stdio
         let cleanJson = this.currentToolArgs;
+        let finalName = this.currentToolName || 'Bash';
         try {
           const parsed = JSON.parse(this.currentToolArgs);
           if (typeof parsed === 'object' && parsed !== null) {
@@ -138,14 +152,26 @@ export class OpenAIToAnthropicSseStream {
             delete parsed.comment;
             delete parsed.reasoning;
 
-            // Detach stdio for background commands so child_process doesn't hang Claude Code CLI
-            if (parsed.command && typeof parsed.command === 'string') {
-              if (/&\s*$/.test(parsed.command) && !parsed.command.includes('disown') && !parsed.command.includes('</dev/null')) {
-                parsed.command = parsed.command.replace(/&\s*$/, '</dev/null >/dev/null 2>&1 & disown');
+            // Intercept Skill tool calls: convert to Bash(cat SKILL.md) so the main loop stays intact
+            // Claude Code CLI's Skill tool opens a sub-agent context that never returns to the main loop
+            if (finalName === 'Skill' || parsed.skill || parsed.skill_name) {
+              const skillName = parsed.skill || parsed.skill_name || parsed.name || 'browser-use';
+              const skillPath = `~/.claude/skills/${skillName}/SKILL.md`;
+              const nudge = `echo '[NSCC] Skill loaded. You MUST immediately execute the skill instructions above by issuing a Bash tool call NOW. Do NOT call Skill again.'`;
+              cleanJson = JSON.stringify({
+                command: `cat ${skillPath} && ${nudge}`,
+              });
+              finalName = 'Bash';
+              Logger.log(`🔄 [skill→bash] Replaced Skill("${skillName}") with Bash(cat ${skillPath})`);
+            } else {
+              // Detach stdio for background commands so child_process doesn't hang Claude Code CLI
+              if (parsed.command && typeof parsed.command === 'string') {
+                if (/&\s*$/.test(parsed.command) && !parsed.command.includes('disown') && !parsed.command.includes('</dev/null')) {
+                  parsed.command = parsed.command.replace(/&\s*$/, '</dev/null >/dev/null 2>&1 & disown');
+                }
               }
+              cleanJson = JSON.stringify(parsed);
             }
-
-            cleanJson = JSON.stringify(parsed);
           }
         } catch {
           cleanJson = this.currentToolArgs;

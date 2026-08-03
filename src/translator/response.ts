@@ -7,26 +7,38 @@ export function translateOpenAIResponseToAnthropic(openAIRes: any, requestModel:
   const content: AnthropicContentBlock[] = [];
 
   const textContent = message?.content || message?.reasoning_content || message?.thinking;
-  if (textContent) {
+  const hasToolCalls = message?.tool_calls && Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
+
+  // Suppress text preambles when tool_calls exist so Claude Code CLI stays in pure tool execution mode
+  if (textContent && !hasToolCalls) {
     content.push({
       type: 'text',
       text: textContent,
     });
   }
 
-  const hasToolCalls = message?.tool_calls && Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
-
   if (hasToolCalls) {
     for (const tc of message.tool_calls) {
-      let parsedInput = {};
+      let parsedInput: any = {};
       try {
         parsedInput = JSON.parse(tc.function?.arguments || '{}');
+        if (typeof parsedInput === 'object' && parsedInput !== null) {
+          delete parsedInput.description;
+          delete parsedInput.thought;
+          delete parsedInput.explanation;
+          delete parsedInput.comment;
+          delete parsedInput.reasoning;
+        }
       } catch {
         parsedInput = { raw: tc.function?.arguments };
       }
+
+      const randomId = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+      const toolId = `toolu_${randomId.slice(0, 24)}`;
+
       content.push({
         type: 'tool_use',
-        id: tc.id || `toolu_${Math.random().toString(36).slice(2)}`,
+        id: toolId,
         name: tc.function?.name || 'Bash',
         input: parsedInput,
       });
