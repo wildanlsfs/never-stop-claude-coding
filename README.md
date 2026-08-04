@@ -126,6 +126,9 @@ nscc -f
 | `nscc config -u <url>` | Set custom fallback base URL (e.g. `https://9router.example.com/v1`) |
 | `nscc config -m <model>` | Set target fallback model |
 | `nscc status` | Display status of `cux`, proxy port, and active fallback configuration |
+| `nscc models` | Fetch & list all available models from 9Router / OpenRouter |
+| `nscc models --set <model_id>` | Set and save active fallback model |
+
 
 ---
 

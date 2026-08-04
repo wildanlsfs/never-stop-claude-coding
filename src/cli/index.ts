@@ -233,6 +233,66 @@ program
     }
   });
 
+// Models command
+program
+  .command('models')
+  .description('List available models from the configured fallback provider (e.g. 9Router / OpenRouter)')
+  .option('-s, --set <model>', 'Set and save selected model')
+  .action(async (options) => {
+    const config = ConfigManager.loadConfig();
+    const baseUrl = config.fallback.baseUrl.replace(/\/+$/, '');
+    const apiKey = config.fallback.apiKey;
+
+    if (options.set) {
+      ConfigManager.saveConfig({ fallback: { ...config.fallback, model: options.set } });
+      console.log(`\n✅ Fallback model set to: '${options.set}'`);
+      console.log(`Saved to ${ConfigManager.getConfigPath()}\n`);
+      return;
+    }
+
+    console.log(`\n🔍 Fetching available models from ${baseUrl}/models...\n`);
+
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (apiKey) {
+        headers['Authorization'] = `Bearer ${apiKey}`;
+      }
+
+      const res = await fetch(`${baseUrl}/models`, { headers });
+      if (!res.ok) {
+        const text = await res.text();
+        console.error(`❌ Failed to fetch models (HTTP ${res.status}): ${text}`);
+        return;
+      }
+
+      const data: any = await res.json();
+      const modelsList: any[] = data.data || data.models || (Array.isArray(data) ? data : []);
+
+      if (modelsList.length === 0) {
+        console.log('⚠️ No models returned by the provider.');
+        return;
+      }
+
+      console.log(`📋 Available Models on ${config.fallback.provider.toUpperCase()} (${modelsList.length} total):\n`);
+      console.log(`Current Active Model: 🌟 ${config.fallback.model}\n`);
+      console.log('--------------------------------------------------------------------------------');
+      
+      modelsList.forEach((m: any) => {
+        const id = m.id || m.name || m;
+        const ownedBy = m.owned_by ? ` (by ${m.owned_by})` : '';
+        const isCurrent = id === config.fallback.model ? '  👈 [ACTIVE]' : '';
+        console.log(`  • ${id}${ownedBy}${isCurrent}`);
+      });
+
+      console.log('--------------------------------------------------------------------------------');
+      console.log('\n💡 To select a model, run:');
+      console.log(`   nscc config -m "<model_id>"   OR   nscc models --set "<model_id>"\n`);
+    } catch (err: any) {
+      console.error(`❌ Error querying ${baseUrl}/models: ${err.message}`);
+    }
+  });
+
+
 // Proxy command (Standalone proxy server)
 program
   .command('proxy')
