@@ -291,16 +291,23 @@ export class ProxyServer {
             if (!res.writableEnded) sseStream.finish('stop');
           };
 
-          // Helper to emit a synthetic Bash tool_use that keeps the session alive
+          // Helper to emit a synthetic Bash tool_use that keeps the session alive.
+          // The command prints a reminder of the original task so the model has context to continue.
           const emitSyntheticContinue = () => {
             const toolId = `toolu_${Math.random().toString(36).slice(2, 26)}`;
-            Logger.log(`🔧 [synthetic-continue] Emitting Bash tool_use to keep session alive (id=${toolId})`);
+            // Extract the original user task from the messages array
+            const messages: any[] = openAIReq.messages || [];
+            const lastUserMsg = [...messages].reverse().find((m: any) => m.role === 'user');
+            const taskHint = typeof lastUserMsg?.content === 'string'
+              ? lastUserMsg.content.slice(0, 300).replace(/'/g, '')
+              : 'Continue with the task. What is the next step?';
+            const cmd = `echo 'TASK REMINDER: ${taskHint}' && echo 'Continue from where you left off. Call the next tool now.'`;
+            Logger.log(`🔧 [synthetic-continue] Emitting Bash reminder to re-anchor model (id=${toolId})`);
             const sseStream = new OpenAIToAnthropicSseStream(res, req.body.model);
             sseStream.init();
-            // Emit a synthetic Bash tool_use: echo to keep the loop alive
             sseStream.processChunk({ choices: [{ delta: { role: 'assistant', content: '' }, finish_reason: null }] });
             sseStream.processChunk({ choices: [{ delta: { tool_calls: [{ index: 0, id: toolId, type: 'function', function: { name: 'Bash', arguments: '' } }] }, finish_reason: null }] });
-            sseStream.processChunk({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"command":"echo \'[nscc] Continuing task — proceed with next step\' && date"}' } }] }, finish_reason: null }] });
+            sseStream.processChunk({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: JSON.stringify({ command: cmd }) } }] }, finish_reason: null }] });
             sseStream.processChunk({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] });
             sseStream.finish('stop');
           };
