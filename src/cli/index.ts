@@ -59,8 +59,9 @@ program
   .allowUnknownOption()
   .option('-f, --fallback', 'Force using 9Router/fallback endpoint directly even if limit is not reached')
   .option('-v, --verbose', 'Show proxy status')
+  .option('-c, --auto-continue', 'Automatically re-inject "continue" when Claude Code stops mid-task')
   .argument('[claudeArgs...]', 'Arguments passed directly to claude')
-  .action(async (claudeArgs: string[], options: { fallback?: boolean; verbose?: boolean }) => {
+  .action(async (claudeArgs: string[], options: { fallback?: boolean; verbose?: boolean; autoContinue?: boolean }) => {
     // Non-blocking update check
     UpdateNotifier.checkUpdate().catch(() => {});
 
@@ -83,17 +84,59 @@ program
       ANTHROPIC_BASE_URL: `http://localhost:${proxyPort}`,
     };
 
-    // Pause parent Node stdin to give child process 100% uninhibited TTY control
+    if (!options.autoContinue) {
+      // Normal mode: pass TTY directly to Claude Code
+      if (process.stdin.isTTY && typeof process.stdin.pause === 'function') {
+        process.stdin.pause();
+      }
+      const result = spawnSync(commandToRun, claudeArgs, {
+        stdio: 'inherit',
+        env: childEnv,
+      });
+      process.exit(result.status ?? 0);
+      return;
+    }
+
+    // --auto-continue mode: re-launch with "continue" when Claude Code stops mid-task
+    console.log('🔁 [nscc] Auto-continue mode enabled. Press Ctrl+C to stop.\n');
+
+    let continueCount = 0;
+    const MAX_CONTINUES = 50;
+
+    // First run: normal interactive session
     if (process.stdin.isTTY && typeof process.stdin.pause === 'function') {
       process.stdin.pause();
     }
-
-    const result = spawnSync(commandToRun, claudeArgs, {
+    let result = spawnSync(commandToRun, claudeArgs, {
       stdio: 'inherit',
       env: childEnv,
     });
 
-    process.exit(result.status ?? 0);
+    // Auto-continue loop: re-run with --print "continue" when Claude Code exits
+    while (continueCount < MAX_CONTINUES) {
+      // Small delay to avoid hammering the API
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      continueCount++;
+      Logger.log(`🔁 [auto-continue] Re-launching (attempt ${continueCount}/${MAX_CONTINUES})`);
+      console.log(`\n🔁 [nscc] Auto-continuing (${continueCount}/${MAX_CONTINUES})...\n`);
+
+      // Re-launch with --print "continue" in non-interactive mode, then resume interactive
+      // First inject "continue" silently
+      const continueResult = spawnSync(commandToRun, ['--print', 'continue', '--output-format', 'text', ...claudeArgs.filter(a => !a.startsWith('-p') && a !== '--print')], {
+        stdio: 'inherit',
+        env: childEnv,
+      });
+
+      if (continueResult.status !== 0) {
+        console.log('\n⚠️ [nscc] Auto-continue exited with error. Stopping.');
+        break;
+      }
+
+      result = continueResult;
+    }
+
+    process.exit(result?.status ?? 0);
   });
 
 // Status command

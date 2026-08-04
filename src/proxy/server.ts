@@ -1,5 +1,7 @@
 import express, { Request, Response } from 'express';
+import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import { ConfigManager } from '../config/manager.js';
 import { CuxManager } from '../cux/manager.js';
 import { translateAnthropicRequestToOpenAI } from '../translator/request.js';
@@ -10,6 +12,72 @@ import { Logger } from '../utils/logger.js';
 export class ProxyServer {
   private app = express();
   private server: http.Server | null = null;
+
+  /**
+   * Intercept Skill tool_use blocks BEFORE forwarding to 9Router.
+   * Reads SKILL.md from disk and injects a synthetic tool_result into the messages array
+   * so 9Router sees the skill as already executed and immediately proceeds with the task.
+   * This completely bypasses Claude Code CLI's skill runner (which stalls the main loop).
+   */
+  private injectSkillResults(messages: any[]): boolean {
+    let injected = false;
+
+    // Find the last assistant message and check for unanswered Skill tool_use blocks
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue;
+
+      for (const block of msg.content) {
+        if (block.type !== 'tool_use' || block.name !== 'Skill') continue;
+
+        const skillName = block.input?.skill || block.input?.skill_name || 'unknown';
+        const toolUseId = block.id;
+
+        // Check if a tool_result already exists for this tool_use_id in a later user message
+        const alreadyAnswered = messages.slice(i + 1).some((laterMsg: any) =>
+          Array.isArray(laterMsg.content) &&
+          laterMsg.content.some((b: any) => b.type === 'tool_result' && b.tool_use_id === toolUseId)
+        );
+        if (alreadyAnswered) continue;
+
+        // Read SKILL.md from disk
+        const skillPath = `${os.homedir()}/.claude/skills/${skillName}/SKILL.md`;
+        let skillContent = '';
+        try {
+          skillContent = fs.readFileSync(skillPath, 'utf-8');
+          Logger.log(`📚 [skill-inject] Loaded skill "${skillName}" from ${skillPath} (${skillContent.length} chars)`);
+        } catch {
+          skillContent = `Skill "${skillName}" not found at ${skillPath}. Proceed with best judgment.`;
+          Logger.log(`⚠️ [skill-inject] SKILL.md not found for "${skillName}" at ${skillPath}`);
+        }
+
+        const nudge = '\n\n[NSCC INSTRUCTION] The skill above is now loaded. ' +
+          'You MUST NOT call Skill again. ' +
+          'Immediately issue the next Bash tool call to execute the task as described by the skill instructions. ' +
+          'Do NOT explain. Do NOT ask. Just act NOW.';
+
+        // Inject a synthetic user message with the tool_result + nudge
+        // Insert it right after the assistant message that made the Skill call
+        messages.splice(i + 1, 0, {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: toolUseId,
+              content: skillContent + nudge,
+            },
+          ],
+        });
+
+        Logger.log(`✅ [skill-inject] Injected synthetic tool_result for Skill("${skillName}") id=${toolUseId}`);
+        injected = true;
+        break; // Process one skill at a time to maintain message order
+      }
+      if (injected) break;
+    }
+
+    return injected;
+  }
 
   constructor() {
     this.app.use(express.json({ limit: '50mb' }));
@@ -141,6 +209,18 @@ export class ProxyServer {
       }
 
       try {
+        // Intercept any pending Skill tool_use blocks — inject SKILL.md content directly
+        // so 9Router sees the skill as already loaded and immediately executes the next step
+        if (Array.isArray(req.body.messages)) {
+          const skillInjected = this.injectSkillResults(req.body.messages);
+          // After injecting skill, force tool_choice=any so 9Router MUST return a tool call
+          // (prevents it from responding with plain conversational text and stopping)
+          if (skillInjected) {
+            req.body.tool_choice = { type: 'any' };
+            Logger.log('🔒 [skill-inject] Forced tool_choice=any to ensure 9Router issues a tool call after skill load');
+          }
+        }
+
         const openAIReq = translateAnthropicRequestToOpenAI(
           req.body,
           config.fallback.model,
@@ -151,16 +231,23 @@ export class ProxyServer {
 
         Logger.log(`⏳ Sending request to ${providerName} (${targetUrl})...`);
 
-        let openAIRes: globalThis.Response;
-        try {
-          openAIRes = await fetch(targetUrl, {
+        const doFetch = async (body: any): Promise<globalThis.Response> => {
+          // Some providers (e.g. 9Router) support extra params to disable output compression.
+          // caveman=false disables 9Router's caveman compression which collapses tool_call JSON into plain text.
+          const extraParams = config.fallback.baseUrl.includes('9router') ? { caveman: false } : {};
+          return fetch(targetUrl, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
               'Authorization': `Bearer ${config.fallback.apiKey}`,
             },
-            body: JSON.stringify(openAIReq),
+            body: JSON.stringify({ ...body, ...extraParams }),
           });
+        };
+
+        let openAIRes: globalThis.Response;
+        try {
+          openAIRes = await doFetch(openAIReq);
         } catch (fetchErr: any) {
           const detail = fetchErr.cause?.message || fetchErr.message;
           Logger.log(`❌ Could not connect to fallback URL (${targetUrl}): ${detail}`);
@@ -181,6 +268,98 @@ export class ProxyServer {
         }
 
         Logger.log(`✅ Received HTTP ${openAIRes.status} response from ${providerName} in ${Date.now() - startTime}ms`);
+
+        // --- Auto-retry with tool_choice=required if 9Router returns end_turn with no tool calls ---
+        // Buffer the streaming response to inspect it before forwarding to Claude Code CLI
+        if (req.body.stream && openAIReq.tools && openAIReq.tools.length > 0) {
+          let rawBody = await openAIRes.text();
+          let hasToolCall = rawBody.includes('"tool_calls"') || rawBody.includes('"function_call"');
+          let hasEndTurn = rawBody.includes('"finish_reason":"stop"') || rawBody.includes('"finish_reason": "stop"');
+
+          // Helper to re-stream a buffered SSE body
+          const restream = (body: string) => {
+            const sseStream = new OpenAIToAnthropicSseStream(res, req.body.model);
+            sseStream.init();
+            for (const line of body.split('\n')) {
+              const trimmed = line.trim();
+              if (!trimmed || trimmed.startsWith(':')) continue;
+              if (trimmed === 'data: [DONE]') { sseStream.finish('stop'); break; }
+              if (trimmed.startsWith('data: ')) {
+                try { sseStream.processChunk(JSON.parse(trimmed.slice(6))); } catch {}
+              }
+            }
+            if (!res.writableEnded) sseStream.finish('stop');
+          };
+
+          // Helper to emit a synthetic Bash tool_use that keeps the session alive
+          const emitSyntheticContinue = () => {
+            const toolId = `toolu_${Math.random().toString(36).slice(2, 26)}`;
+            Logger.log(`🔧 [synthetic-continue] Emitting Bash tool_use to keep session alive (id=${toolId})`);
+            const sseStream = new OpenAIToAnthropicSseStream(res, req.body.model);
+            sseStream.init();
+            // Emit a synthetic Bash tool_use: echo to keep the loop alive
+            sseStream.processChunk({ choices: [{ delta: { role: 'assistant', content: '' }, finish_reason: null }] });
+            sseStream.processChunk({ choices: [{ delta: { tool_calls: [{ index: 0, id: toolId, type: 'function', function: { name: 'Bash', arguments: '' } }] }, finish_reason: null }] });
+            sseStream.processChunk({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"command":"echo \'[nscc] Continuing task — proceed with next step\' && date"}' } }] }, finish_reason: null }] });
+            sseStream.processChunk({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] });
+            sseStream.finish('stop');
+          };
+
+          // Check if model genuinely signals task completion (don't synthetic-continue then)
+          const isTaskDone = (body: string) => {
+            const lower = body.toLowerCase();
+            return lower.includes('task complete') || lower.includes('testing complete') ||
+              lower.includes('all tests passed') || lower.includes('qa complete') ||
+              lower.includes('test finished') || lower.includes('completed successfully');
+          };
+
+          if (hasEndTurn && !hasToolCall) {
+            // Retry up to 3 times with tool_choice=required
+            let retrySucceeded = false;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              Logger.log(`🔁 [auto-retry] end_turn with no tool calls — retry ${attempt}/3 with tool_choice=required`);
+              try {
+                const retryRes = await doFetch({ ...openAIReq, tool_choice: 'required' });
+                if (retryRes.ok) {
+                  const retryBody = await retryRes.text();
+                  const retryHasToolCall = retryBody.includes('"tool_calls"') || retryBody.includes('"function_call"');
+                  const retryHasEndTurn = retryBody.includes('"finish_reason":"stop"') || retryBody.includes('"finish_reason": "stop"');
+                  if (retryHasToolCall || !retryHasEndTurn) {
+                    Logger.log(`✅ [auto-retry] Retry ${attempt} succeeded — forwarding tool_choice=required response`);
+                    rawBody = retryBody;
+                    hasToolCall = retryHasToolCall;
+                    hasEndTurn = retryHasEndTurn;
+                    retrySucceeded = true;
+                    break;
+                  }
+                  Logger.log(`⚠️ [auto-retry] Retry ${attempt} still returned end_turn`);
+                  rawBody = retryBody; // use latest body for task-done check
+                } else {
+                  Logger.log(`⚠️ [auto-retry] Retry ${attempt} HTTP ${retryRes.status}`);
+                }
+              } catch (e: any) {
+                Logger.log(`⚠️ [auto-retry] Retry ${attempt} fetch error: ${e.message}`);
+              }
+            }
+
+            if (retrySucceeded) {
+              restream(rawBody);
+            } else if (isTaskDone(rawBody)) {
+              // Model genuinely finished — let end_turn through
+              Logger.log('✅ [auto-retry] Task completion detected — forwarding end_turn');
+              restream(rawBody);
+            } else {
+              // All retries failed — emit synthetic Bash to keep session alive
+              Logger.log('🔧 [auto-retry] All retries exhausted — emitting synthetic Bash continue');
+              emitSyntheticContinue();
+            }
+            return;
+          } else {
+            // No retry needed — re-stream the already-buffered response
+            restream(rawBody);
+            return;
+          }
+        }
 
         if (req.body.stream) {
           const sseStream = new OpenAIToAnthropicSseStream(res, req.body.model);

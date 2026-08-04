@@ -79,13 +79,7 @@ export class OpenAIToAnthropicSseStream {
           const randomId = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
           this.currentToolCallId = `toolu_${randomId.slice(0, 24)}`;
           this.currentToolArgs = '';
-          let finalToolName = this.currentToolName || tc.function?.name || 'Bash';
-
-          // Intercept Skill tool: emit as Bash so Claude Code CLI executes it in the main tool loop
-          // (Skill opens a sub-agent context that stalls the main loop and never returns)
-          if (finalToolName === 'Skill') {
-            finalToolName = 'Bash';
-          }
+          const finalToolName = this.currentToolName || tc.function?.name || 'Bash';
 
           Logger.log(`🛠️ [tool_use] Opening tool block #${this.currentBlockIndex} (name: "${finalToolName}", id: "${this.currentToolCallId}")`);
 
@@ -152,20 +146,22 @@ export class OpenAIToAnthropicSseStream {
             delete parsed.comment;
             delete parsed.reasoning;
 
-            // Intercept Skill tool calls: convert to Bash(cat SKILL.md) so the main loop stays intact
-            // Claude Code CLI's Skill tool opens a sub-agent context that never returns to the main loop
+            // Sanitize Skill tool input to strictly {"skill":"name"} (strip extra keys)
             if (finalName === 'Skill' || parsed.skill || parsed.skill_name) {
-              const skillName = parsed.skill || parsed.skill_name || parsed.name || 'browser-use';
-              const skillPath = `~/.claude/skills/${skillName}/SKILL.md`;
-              const nudge = `echo '[NSCC] Skill loaded. You MUST immediately execute the skill instructions above by issuing a Bash tool call NOW. Do NOT call Skill again.'`;
-              cleanJson = JSON.stringify({
-                command: `cat ${skillPath} && ${nudge}`,
-              });
-              finalName = 'Bash';
-              Logger.log(`🔄 [skill→bash] Replaced Skill("${skillName}") with Bash(cat ${skillPath})`);
+              const skillName = parsed.skill || parsed.skill_name || parsed.name || 'unknown';
+              cleanJson = JSON.stringify({ skill: skillName });
+              Logger.log(`📚 [skill] Sanitized Skill tool input: {"skill":"${skillName}"}`);
             } else {
-              // Detach stdio for background commands so child_process doesn't hang Claude Code CLI
               if (parsed.command && typeof parsed.command === 'string') {
+                // Strip blocking pipes from interactive/stateful CLI tools.
+                // These tools produce output that must be read before deciding the next action,
+                // so piping their output to tail/grep/etc. causes the session to hang.
+                const interactiveToolPattern = /^(browser-use|playwright|puppeteer|selenium|appium)\s+\w+/;
+                if (interactiveToolPattern.test(parsed.command.trim()) && parsed.command.includes('|')) {
+                  parsed.command = parsed.command.replace(/\s*\|.*$/, '').trim();
+                  Logger.log(`🔧 [sanitize] Stripped blocking pipe from interactive tool command`);
+                }
+                // Detach stdio for background commands so child_process doesn't hang Claude Code CLI
                 if (/&\s*$/.test(parsed.command) && !parsed.command.includes('disown') && !parsed.command.includes('</dev/null')) {
                   parsed.command = parsed.command.replace(/&\s*$/, '</dev/null >/dev/null 2>&1 & disown');
                 }

@@ -14,11 +14,15 @@ export function translateAnthropicRequestToOpenAI(
 
   // 1. System Prompt with Autonomous Agent Instruction for Fallback Models (9Router / DeepSeek)
   const nsccToolSystemPrompt = `[CRITICAL INSTRUCTION - CLAUDE CODE AUTONOMOUS AGENT MODE]:
-You are an autonomous AI coding assistant operating inside Claude Code CLI.
-1. CONTINUOUS WORKFLOW EXECUTION: When given a task, loading a skill or reading a file is ONLY the first step! You MUST immediately follow up by issuing the next appropriate tool call (e.g. Bash) to actually perform the task.
-2. NEVER STOP AFTER LOADING A SKILL: When you receive a skill result (e.g. [Tool Result: Launching skill: ...] or the skill's SKILL.md content), do NOT send end_turn or stop. You MUST immediately issue the next Bash tool call to execute the skill's instructions.
-3. AUTOMATIC SERVER STARTUP: If the user's task requires a running dev server and it is not running, start it in the background first (e.g. npm run dev </dev/null >/dev/null 2>&1 & disown, or the appropriate framework command) and then proceed with the task.
-4. ONLY STOP WHEN THE TASK IS COMPLETELY FINISHED AND VERIFIED, OR IF USER INPUT IS REQUIRED.`;
+You are an autonomous AI coding assistant inside Claude Code CLI. You MUST work like an autonomous agent — continuously calling tools until the task is 100% complete without stopping to explain or ask.
+
+CORE RULES:
+1. ALWAYS CALL THE NEXT TOOL: After EVERY tool result, immediately issue the next Bash tool call. NEVER output plain text and stop. NEVER say "I will now do X" without immediately calling the tool to do X.
+2. MULTI-STEP CLI TOOLS: When using tools that require sequential steps (e.g. open → inspect → interact → verify), run each step as a separate Bash call. Never chain them with pipes if each step produces output needed for the next decision.
+3. NEVER PIPE INTERACTIVE TOOLS: Do NOT pipe (|) the output of interactive or stateful CLI tools. Run each command standalone so you can inspect its output before deciding the next action.
+4. NEVER STOP MID-TASK: Do not stop until the full task is verified complete. If you encounter an error, handle it and continue.
+5. BACKGROUND SERVERS: Start dev servers in background with: command </dev/null >/dev/null 2>&1 & disown`;
+
 
   let systemContent = nsccToolSystemPrompt;
   if (anthropicReq.system) {
@@ -35,8 +39,9 @@ You are an autonomous AI coding assistant operating inside Claude Code CLI.
   });
 
   // 2. Process Messages
-  // Track Skill tool_use IDs so we can detect their tool_results and inject a follow-up nudge
-  const skillToolUseIds = new Set<string>();
+  // Track Bash tool_use IDs that were skill-reads (Skill→Bash intercept) so we can inject
+  // a follow-up nudge after their results, forcing 9Router to execute the skill instructions
+  const skillBashToolUseIds = new Set<string>();
 
   for (const msg of anthropicReq.messages) {
     if (typeof msg.content === 'string') {
@@ -51,7 +56,7 @@ You are an autonomous AI coding assistant operating inside Claude Code CLI.
       const textParts: string[] = [];
       const toolCalls: OpenAIMessage['tool_calls'] = [];
       const toolResults: Array<{ tool_use_id: string; content: string }> = [];
-      let hasSkillResult = false;
+      let hasSkillBashResult = false;
 
       for (const block of msg.content) {
         if (block.type === 'text') {
@@ -59,9 +64,12 @@ You are an autonomous AI coding assistant operating inside Claude Code CLI.
             textParts.push(block.text);
           }
         } else if (block.type === 'tool_use') {
-          // Track Skill tool_use IDs so we can detect their results later
-          if (block.name === 'Skill') {
-            skillToolUseIds.add(block.id);
+          // Detect Bash tool_calls that are skill-reads (injected by our Skill→Bash intercept)
+          if (block.name === 'Bash') {
+            const cmd = typeof block.input?.command === 'string' ? block.input.command : '';
+            if (cmd.includes('/.claude/skills/') && cmd.includes('SKILL.md')) {
+              skillBashToolUseIds.add(block.id);
+            }
           }
           toolCalls.push({
             id: block.id,
@@ -85,9 +93,13 @@ You are an autonomous AI coding assistant operating inside Claude Code CLI.
             resContent = `[Tool Error]: ${resContent}`;
           }
 
-          // Check if this tool_result is the response to a Skill tool_use
-          if (skillToolUseIds.has(block.tool_use_id)) {
-            hasSkillResult = true;
+          // Check if this tool_result is from a skill-read Bash call
+          if (skillBashToolUseIds.has(block.tool_use_id)) {
+            hasSkillBashResult = true;
+          }
+          // Also detect by content: if the Bash output contains the NSCC skill-loaded marker
+          if (resContent.includes('[NSCC] Skill loaded') || resContent.includes('/.claude/skills/')) {
+            hasSkillBashResult = true;
           }
 
           toolResults.push({
@@ -106,13 +118,13 @@ You are an autonomous AI coding assistant operating inside Claude Code CLI.
         });
       }
 
-      // CRITICAL: After a Skill tool result, inject a strong user nudge so 9Router/DeepSeek
-      // immediately issues a Bash tool call instead of re-calling Skill again.
-      if (hasSkillResult) {
+      // CRITICAL: After a skill-read Bash result, inject a strong user nudge so 9Router/DeepSeek
+      // immediately issues the next Bash tool call to execute the skill instructions instead of stopping.
+      if (hasSkillBashResult) {
         openAIMessages.push({
           role: 'user',
           content: '[SYSTEM INSTRUCTION] The skill instructions above are now loaded and active. ' +
-            'You MUST NOT call Skill again. ' +
+            'You MUST NOT read the skill again. ' +
             'Follow the skill instructions exactly and immediately issue your next Bash tool call to execute the task. ' +
             'Do NOT ask for confirmation. Do NOT explain. Just call Bash NOW.',
         });
