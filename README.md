@@ -129,6 +129,24 @@ nscc -f
 
 ---
 
+## ⚠️ Known Limitations & Model Selection Guide
+
+When using **Force Fallback Mode** (`nscc -f`) with 9Router, OpenRouter, or custom endpoints, the reliability of autonomous tool execution depends heavily on the chosen fallback model:
+
+### 1. Model Tool-Calling Adherence (Function Calling)
+- **Rotators & Free/Flash Tier Models** (e.g. `combo`, `deepseek-v4-flash-free`): These models are optimized for chat responses and often summarize tool output in plain text, returning `finish_reason: "stop"` instead of issuing structured `tool_calls` JSON. This can cause Claude Code to halt mid-task.
+- **Output Compression / Caveman Mode**: 9Router features output compression (Caveman mode), which converts tool call JSON into plain text summaries. `nscc` automatically passes `caveman: false` for 9Router endpoints to preserve tool call schemas.
+- **Recommended Models for Multi-Step Agent Loops**:
+  - 🥇 **`cx/gpt-5.4-mini` / `cx/gpt-5.5`**: Highest tool-calling reliability and strict schema adherence.
+  - 🥈 **`ollama/qwen3.5`**: Excellent open-source model for sequential CLI/tool workflows.
+  - 🥉 **`ollama/glm-5` / `ollama/glm-4.7-flash`**: Superior native function-calling support compared to DeepSeek flash variants.
+
+### 2. Auto-Continue Mode (`-c` / `--auto-continue`)
+If a fallback model halts mid-task by returning an text summary instead of a tool call, `nscc -c` automatically re-injects task context to re-anchor the model into continuing the execution loop.
+
+
+---
+
 ## 📄 License
 
 Distributed under the MIT License. See `LICENSE` for more information.
