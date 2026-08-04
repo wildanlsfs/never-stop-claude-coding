@@ -1,4 +1,5 @@
 import { Response } from 'express';
+import { openAiIdToAnthropic } from './id-map.js';
 import { Logger } from '../utils/logger.js';
 
 export class OpenAIToAnthropicSseStream {
@@ -75,9 +76,8 @@ export class OpenAIToAnthropicSseStream {
           this.currentBlockType = 'tool_use';
           this.activeToolIndex = toolIndex;
 
-          // Format tool call ID strictly in native Anthropic format ('toolu_...') so Claude Code auto-approves permissions
-          const randomId = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-          this.currentToolCallId = `toolu_${randomId.slice(0, 24)}`;
+          // Format tool call ID deterministically so tool_result responses match original OpenAI ID
+          this.currentToolCallId = openAiIdToAnthropic(tc.id);
           this.currentToolArgs = '';
           const finalToolName = this.currentToolName || tc.function?.name || 'Bash';
 

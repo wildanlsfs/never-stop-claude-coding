@@ -4,6 +4,7 @@ import type {
   OpenAIMessage,
   OpenAITool,
 } from './types.js';
+import { anthropicIdToOpenAi } from './id-map.js';
 
 export function translateAnthropicRequestToOpenAI(
   anthropicReq: AnthropicMessagesRequest,
@@ -39,9 +40,6 @@ CORE RULES:
   });
 
   // 2. Process Messages
-  // Track Bash tool_use IDs that were skill-reads (Skill→Bash intercept) so we can inject
-  // a follow-up nudge after their results, forcing 9Router to execute the skill instructions
-  const skillBashToolUseIds = new Set<string>();
 
   for (const msg of anthropicReq.messages) {
     if (typeof msg.content === 'string') {
@@ -56,7 +54,6 @@ CORE RULES:
       const textParts: string[] = [];
       const toolCalls: OpenAIMessage['tool_calls'] = [];
       const toolResults: Array<{ tool_use_id: string; content: string }> = [];
-      let hasSkillBashResult = false;
 
       for (const block of msg.content) {
         if (block.type === 'text') {
@@ -64,15 +61,8 @@ CORE RULES:
             textParts.push(block.text);
           }
         } else if (block.type === 'tool_use') {
-          // Detect Bash tool_calls that are skill-reads (injected by our Skill→Bash intercept)
-          if (block.name === 'Bash') {
-            const cmd = typeof block.input?.command === 'string' ? block.input.command : '';
-            if (cmd.includes('/.claude/skills/') && cmd.includes('SKILL.md')) {
-              skillBashToolUseIds.add(block.id);
-            }
-          }
           toolCalls.push({
-            id: block.id,
+            id: anthropicIdToOpenAi(block.id),
             type: 'function',
             function: {
               name: block.name,
@@ -93,17 +83,8 @@ CORE RULES:
             resContent = `[Tool Error]: ${resContent}`;
           }
 
-          // Check if this tool_result is from a skill-read Bash call
-          if (skillBashToolUseIds.has(block.tool_use_id)) {
-            hasSkillBashResult = true;
-          }
-          // Also detect by content: if the Bash output contains the NSCC skill-loaded marker
-          if (resContent.includes('[NSCC] Skill loaded') || resContent.includes('/.claude/skills/')) {
-            hasSkillBashResult = true;
-          }
-
           toolResults.push({
-            tool_use_id: block.tool_use_id,
+            tool_use_id: anthropicIdToOpenAi(block.tool_use_id),
             content: resContent || 'Success',
           });
         }
@@ -118,19 +99,7 @@ CORE RULES:
         });
       }
 
-      // CRITICAL: After a skill-read Bash result, inject a strong user nudge so 9Router/DeepSeek
-      // immediately issues the next Bash tool call to execute the skill instructions instead of stopping.
-      if (hasSkillBashResult) {
-        openAIMessages.push({
-          role: 'user',
-          content: '[SYSTEM INSTRUCTION] The skill instructions above are now loaded and active. ' +
-            'You MUST NOT read the skill again. ' +
-            'Follow the skill instructions exactly and immediately issue your next Bash tool call to execute the task. ' +
-            'Do NOT ask for confirmation. Do NOT explain. Just call Bash NOW.',
-        });
-      }
-
-      // Then push text or tool_calls message
+      // Then push text or tool_calls message (if assistant or user has text/tool_calls)
       if (textParts.length > 0 || (toolCalls && toolCalls.length > 0)) {
         const message: OpenAIMessage = {
           role: msg.role,
@@ -143,6 +112,7 @@ CORE RULES:
       }
     }
   }
+
 
   // 3. Tools Definition & Tool Choice Translation
   let openAITools: OpenAITool[] | undefined;

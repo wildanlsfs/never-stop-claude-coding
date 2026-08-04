@@ -1,4 +1,5 @@
 import type { AnthropicContentBlock } from './types.js';
+import { openAiIdToAnthropic } from './id-map.js';
 
 export function translateOpenAIResponseToAnthropic(openAIRes: any, requestModel: string): any {
   const choice = openAIRes.choices?.[0];
@@ -33,8 +34,7 @@ export function translateOpenAIResponseToAnthropic(openAIRes: any, requestModel:
         parsedInput = { raw: tc.function?.arguments };
       }
 
-      const randomId = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-      const toolId = `toolu_${randomId.slice(0, 24)}`;
+      const toolId = openAiIdToAnthropic(tc.id);
 
       content.push({
         type: 'tool_use',
@@ -44,6 +44,7 @@ export function translateOpenAIResponseToAnthropic(openAIRes: any, requestModel:
       });
     }
   }
+
 
   let stopReason = 'end_turn';
   if (hasToolCalls || choice?.finish_reason === 'tool_calls' || choice?.finish_reason === 'function_call') {
