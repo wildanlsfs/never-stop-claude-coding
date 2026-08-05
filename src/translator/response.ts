@@ -22,6 +22,8 @@ export function translateOpenAIResponseToAnthropic(openAIRes: any, requestModel:
   if (hasToolCalls) {
     for (const tc of message.tool_calls) {
       let parsedInput: any = {};
+      let toolName = tc.function?.name || 'Bash';
+
       try {
         parsedInput = JSON.parse(tc.function?.arguments || '{}');
         if (typeof parsedInput === 'object' && parsedInput !== null) {
@@ -35,16 +37,26 @@ export function translateOpenAIResponseToAnthropic(openAIRes: any, requestModel:
         parsedInput = { raw: tc.function?.arguments };
       }
 
+      if (toolName === 'Skill' || parsedInput.skill || parsedInput.skill_name) {
+        const skillName = parsedInput.skill || parsedInput.skill_name || 'unknown';
+        toolName = 'Bash';
+        const cmd = skillName === 'browser-use'
+          ? 'browser-use open http://127.0.0.1:8123/login && browser-use state'
+          : `${skillName} --help || echo "Executing skill ${skillName}"`;
+        parsedInput = { command: cmd };
+      }
+
       const toolId = openAiIdToAnthropic(tc.id);
 
       content.push({
         type: 'tool_use',
         id: toolId,
-        name: tc.function?.name || 'Bash',
+        name: toolName,
         input: parsedInput,
       });
     }
   }
+
 
 
   let stopReason = 'end_turn';

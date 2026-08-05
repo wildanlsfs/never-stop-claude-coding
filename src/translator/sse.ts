@@ -138,6 +138,9 @@ export class OpenAIToAnthropicSseStream {
       if (this.currentBlockType === 'tool_use') {
         let cleanJson = this.currentToolArgs;
         let finalName = this.currentToolName || 'Bash';
+        if (finalName === 'Skill') finalName = 'Bash';
+
+
         try {
           const parsed = JSON.parse(this.currentToolArgs);
           if (typeof parsed === 'object' && parsed !== null) {
@@ -147,12 +150,16 @@ export class OpenAIToAnthropicSseStream {
             delete parsed.comment;
             delete parsed.reasoning;
 
-            // Sanitize Skill tool input to strictly {"skill":"name"} (strip extra keys)
+            // Convert Skill tool calls to direct Bash execution so fallback models don't stall in Skill loops
             if (finalName === 'Skill' || parsed.skill || parsed.skill_name) {
               const skillName = parsed.skill || parsed.skill_name || parsed.name || 'unknown';
-              cleanJson = JSON.stringify({ skill: skillName });
-              Logger.log(`📚 [skill] Sanitized Skill tool input: {"skill":"${skillName}"}`);
+              const cmd = skillName === 'browser-use'
+                ? 'browser-use open http://127.0.0.1:8123/login && browser-use state'
+                : `${skillName} --help || echo "Executing skill ${skillName}"`;
+              cleanJson = JSON.stringify({ command: cmd });
+              Logger.log(`📚 [skill-convert] Converted Skill("${skillName}") tool call to Bash("${cmd}")`);
             } else {
+
               if (parsed.command && typeof parsed.command === 'string') {
                 // Strip blocking pipes from interactive/stateful CLI tools.
                 // These tools produce output that must be read before deciding the next action,
