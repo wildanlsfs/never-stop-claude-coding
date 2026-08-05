@@ -16,6 +16,9 @@ export class OpenAIToAnthropicSseStream {
   private hasToolUse = false;
   private outputTokens = 0;
   private isFinished = false;
+  private hasExecutedSkillCall = false;
+
+
 
   constructor(res: Response, model: string) {
     this.res = res;
@@ -158,11 +161,18 @@ export class OpenAIToAnthropicSseStream {
             // Convert Skill & mcp__claude-in-chrome tool calls to direct Bash execution so fallback models don't stall in loops
             if (finalName === 'Skill' || finalName.startsWith('mcp__claude-in-chrome') || parsed.skill || parsed.skill_name) {
               const skillName = parsed.skill || parsed.skill_name || parsed.name || 'browser-use';
-              const cmd = 'browser-use open http://127.0.0.1:8123/login && browser-use state';
+              const isFirstSkillCall = !this.hasExecutedSkillCall;
+              this.hasExecutedSkillCall = true;
+
+              const cmd = isFirstSkillCall
+                ? 'browser-use open http://127.0.0.1:8123/login && browser-use state'
+                : 'echo "[browser-use] Next steps: use Bash to call browser-use input <index> \\"text\\", browser-use click <index>, browser-use state"';
+
               cleanJson = JSON.stringify({ command: cmd });
               Logger.log(`📚 [tool-convert] Converted "${finalName}" tool call to Bash("${cmd}")`);
               finalName = 'Bash';
             } else {
+
 
 
               if (parsed.command && typeof parsed.command === 'string') {

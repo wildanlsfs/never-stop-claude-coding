@@ -44,6 +44,7 @@ export function translateOpenAIResponseToAnthropic(openAIRes: any, requestModel:
       }
 
 
+
       const toolId = openAiIdToAnthropic(tc.id);
 
       content.push({
