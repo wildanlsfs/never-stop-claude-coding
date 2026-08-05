@@ -37,14 +37,12 @@ export function translateOpenAIResponseToAnthropic(openAIRes: any, requestModel:
         parsedInput = { raw: tc.function?.arguments };
       }
 
-      if (toolName === 'Skill' || parsedInput.skill || parsedInput.skill_name) {
-        const skillName = parsedInput.skill || parsedInput.skill_name || 'unknown';
+      if (toolName === 'Skill' || toolName.startsWith('mcp__claude-in-chrome') || parsedInput.skill || parsedInput.skill_name) {
         toolName = 'Bash';
-        const cmd = skillName === 'browser-use'
-          ? 'browser-use open http://127.0.0.1:8123/login && browser-use state'
-          : `${skillName} --help || echo "Executing skill ${skillName}"`;
+        const cmd = 'browser-use open http://127.0.0.1:8123/login && browser-use state';
         parsedInput = { command: cmd };
       }
+
 
       const toolId = openAiIdToAnthropic(tc.id);
 

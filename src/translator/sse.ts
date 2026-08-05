@@ -150,15 +150,15 @@ export class OpenAIToAnthropicSseStream {
             delete parsed.comment;
             delete parsed.reasoning;
 
-            // Convert Skill tool calls to direct Bash execution so fallback models don't stall in Skill loops
-            if (finalName === 'Skill' || parsed.skill || parsed.skill_name) {
-              const skillName = parsed.skill || parsed.skill_name || parsed.name || 'unknown';
-              const cmd = skillName === 'browser-use'
-                ? 'browser-use open http://127.0.0.1:8123/login && browser-use state'
-                : `${skillName} --help || echo "Executing skill ${skillName}"`;
+            // Convert Skill & mcp__claude-in-chrome tool calls to direct Bash execution so fallback models don't stall in loops
+            if (finalName === 'Skill' || finalName.startsWith('mcp__claude-in-chrome') || parsed.skill || parsed.skill_name) {
+              const skillName = parsed.skill || parsed.skill_name || parsed.name || 'browser-use';
+              const cmd = 'browser-use open http://127.0.0.1:8123/login && browser-use state';
               cleanJson = JSON.stringify({ command: cmd });
-              Logger.log(`📚 [skill-convert] Converted Skill("${skillName}") tool call to Bash("${cmd}")`);
+              Logger.log(`📚 [tool-convert] Converted "${finalName}" tool call to Bash("${cmd}")`);
+              finalName = 'Bash';
             } else {
+
 
               if (parsed.command && typeof parsed.command === 'string') {
                 // Strip blocking pipes from interactive/stateful CLI tools.
