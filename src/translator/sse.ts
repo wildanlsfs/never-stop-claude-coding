@@ -100,30 +100,30 @@ export class OpenAIToAnthropicSseStream {
           this.outputTokens++;
         }
       }
-    } else {
-      // Handle text delta (only if no tool calls have been issued in this turn to prevent Claude Code turn termination)
-      const textChunk = delta?.content ?? delta?.reasoning_content ?? delta?.thinking ?? delta?.text;
+    }
 
-      if (textChunk && !this.hasToolUse) {
-        if (this.currentBlockType !== 'text') {
-          this.closeCurrentBlock();
-          this.currentBlockIndex++;
-          this.currentBlockType = 'text';
+    // Handle text delta (preserve chain-of-thought reasoning alongside tool calls)
+    const textChunk = delta?.content ?? delta?.reasoning_content ?? delta?.thinking ?? delta?.text;
 
-          this.emitEvent('content_block_start', {
-            type: 'content_block_start',
-            index: this.currentBlockIndex,
-            content_block: { type: 'text', text: '' },
-          });
-        }
+    if (textChunk) {
+      if (this.currentBlockType !== 'text') {
+        this.closeCurrentBlock();
+        this.currentBlockIndex++;
+        this.currentBlockType = 'text';
 
-        this.outputTokens++;
-        this.emitEvent('content_block_delta', {
-          type: 'content_block_delta',
+        this.emitEvent('content_block_start', {
+          type: 'content_block_start',
           index: this.currentBlockIndex,
-          delta: { type: 'text_delta', text: textChunk },
+          content_block: { type: 'text', text: '' },
         });
       }
+
+      this.outputTokens++;
+      this.emitEvent('content_block_delta', {
+        type: 'content_block_delta',
+        index: this.currentBlockIndex,
+        delta: { type: 'text_delta', text: textChunk },
+      });
     }
 
     // Handle finish_reason
@@ -133,6 +133,7 @@ export class OpenAIToAnthropicSseStream {
   }
 
   private closeCurrentBlock() {
+
     if (this.currentBlockType !== null) {
       if (this.currentBlockType === 'tool_use') {
         let cleanJson = this.currentToolArgs;

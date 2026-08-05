@@ -13,31 +13,23 @@ export function translateAnthropicRequestToOpenAI(
 ): OpenAIChatRequest {
   const openAIMessages: OpenAIMessage[] = [];
 
-  // 1. System Prompt with Autonomous Agent Instruction for Fallback Models (9Router / DeepSeek)
-  const nsccToolSystemPrompt = `[CRITICAL INSTRUCTION - CLAUDE CODE AUTONOMOUS AGENT MODE]:
-You are an autonomous AI coding assistant inside Claude Code CLI. You MUST work like an autonomous agent — continuously calling tools until the task is 100% complete without stopping to explain or ask.
-
-CORE RULES:
-1. ALWAYS CALL THE NEXT TOOL: After EVERY tool result, immediately issue the next Bash tool call. NEVER output plain text and stop. NEVER say "I will now do X" without immediately calling the tool to do X.
-2. MULTI-STEP CLI TOOLS: When using tools that require sequential steps (e.g. open → inspect → interact → verify), run each step as a separate Bash call. Never chain them with pipes if each step produces output needed for the next decision.
-3. NEVER PIPE INTERACTIVE TOOLS: Do NOT pipe (|) the output of interactive or stateful CLI tools. Run each command standalone so you can inspect its output before deciding the next action.
-4. NEVER STOP MID-TASK: Do not stop until the full task is verified complete. If you encounter an error, handle it and continue.
-5. BACKGROUND SERVERS: Start dev servers in background with: command </dev/null >/dev/null 2>&1 & disown`;
-
-
-  let systemContent = nsccToolSystemPrompt;
+  // 1. System Prompt Translation
+  let systemContent = '';
   if (anthropicReq.system) {
     if (typeof anthropicReq.system === 'string') {
-      systemContent += '\n\n' + anthropicReq.system;
+      systemContent = anthropicReq.system;
     } else if (Array.isArray(anthropicReq.system)) {
-      systemContent += '\n\n' + anthropicReq.system.map((b) => b.text).join('\n');
+      systemContent = anthropicReq.system.map((b) => b.text).join('\n');
     }
   }
 
-  openAIMessages.push({
-    role: 'system',
-    content: systemContent,
-  });
+  if (systemContent.trim()) {
+    openAIMessages.push({
+      role: 'system',
+      content: systemContent,
+    });
+  }
+
 
   // 2. Process Messages
 

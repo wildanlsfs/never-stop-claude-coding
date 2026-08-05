@@ -10,13 +10,14 @@ export function translateOpenAIResponseToAnthropic(openAIRes: any, requestModel:
   const textContent = message?.content || message?.reasoning_content || message?.thinking;
   const hasToolCalls = message?.tool_calls && Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
 
-  // Suppress text preambles when tool_calls exist so Claude Code CLI stays in pure tool execution mode
-  if (textContent && !hasToolCalls) {
+  // Always preserve text reasoning so the model retains its chain-of-thought context across turns
+  if (textContent && textContent.trim()) {
     content.push({
       type: 'text',
       text: textContent,
     });
   }
+
 
   if (hasToolCalls) {
     for (const tc of message.tool_calls) {
