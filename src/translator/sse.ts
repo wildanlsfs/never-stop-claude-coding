@@ -79,7 +79,11 @@ export class OpenAIToAnthropicSseStream {
           // Format tool call ID deterministically so tool_result responses match original OpenAI ID
           this.currentToolCallId = openAiIdToAnthropic(tc.id);
           this.currentToolArgs = '';
-          const finalToolName = this.currentToolName || tc.function?.name || 'Bash';
+          let rawName = this.currentToolName || tc.function?.name || 'Bash';
+          if (rawName === 'Skill' || rawName.startsWith('mcp__claude-in-chrome')) {
+            rawName = 'Bash';
+          }
+          const finalToolName = rawName;
 
           Logger.log(`🛠️ [tool_use] Opening tool block #${this.currentBlockIndex} (name: "${finalToolName}", id: "${this.currentToolCallId}")`);
 
@@ -93,6 +97,7 @@ export class OpenAIToAnthropicSseStream {
               input: {},
             },
           });
+
         }
 
         if (tc.function?.arguments) {
