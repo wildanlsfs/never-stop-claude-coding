@@ -210,27 +210,54 @@ export class ProxyServer {
           };
 
           if (hasEndTurn && !hasToolCall) {
-            Logger.log(`🔁 [auto-retry] 9Router returned end_turn with no tool calls — retrying with tool_choice=required`);
-            try {
-              const retryRes = await doFetch({ ...openAIReq, tool_choice: 'required' });
-              if (retryRes.ok) {
-                const retryBody = await retryRes.text();
-                const retryHasToolCall = retryBody.includes('"tool_calls"') || retryBody.includes('"function_call"');
-                if (retryHasToolCall) {
-                  Logger.log(`✅ [auto-retry] Retry succeeded — forwarding tool_choice=required response`);
-                  restream(retryBody);
-                  return;
+            // Try tool_choice=required retry
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              Logger.log(`🔁 [auto-retry] 9Router returned end_turn with no tool calls — retry ${attempt}/3 with tool_choice=required`);
+              try {
+                const retryRes = await doFetch({ ...openAIReq, tool_choice: 'required' });
+                if (retryRes.ok) {
+                  const retryBody = await retryRes.text();
+                  const retryHasToolCall = retryBody.includes('"tool_calls"') || retryBody.includes('"function_call"');
+                  if (retryHasToolCall) {
+                    Logger.log(`✅ [auto-retry] Retry ${attempt} succeeded — forwarding tool_choice=required response`);
+                    restream(retryBody);
+                    return;
+                  }
                 }
+              } catch (e: any) {
+                Logger.log(`⚠️ [auto-retry] Retry ${attempt} error: ${e.message}`);
               }
-            } catch (e: any) {
-              Logger.log(`⚠️ [auto-retry] Retry fetch error: ${e.message}`);
             }
-            restream(rawBody);
+
+            // All retries failed — emit a synthetic Bash tool_use to keep session alive in Claude Code CLI
+            const toolId = `toolu_map_Bash_${Date.now()}`;
+            Logger.log(`🔧 [synthetic-continue] Emitting Bash keepalive tool_use (id=${toolId})`);
+            const sseStream = new OpenAIToAnthropicSseStream(res, req.body.model);
+            sseStream.init();
+            sseStream.processChunk({
+              choices: [{
+                delta: {
+                  role: 'assistant',
+                  tool_calls: [{
+                    index: 0,
+                    id: toolId,
+                    type: 'function',
+                    function: {
+                      name: 'Bash',
+                      arguments: JSON.stringify({ command: "echo '[nscc] Auto-continuing task...' && date" }),
+                    },
+                  }],
+                },
+                finish_reason: 'tool_calls',
+              }],
+            });
+            sseStream.finish('stop');
             return;
           } else {
             restream(rawBody);
             return;
           }
+
         }
 
         if (req.body.stream) {
@@ -344,12 +371,10 @@ export class ProxyServer {
               execSync(`lsof -ti:${port} | xargs kill -9 2>/dev/null || true`);
             } catch {}
             setTimeout(() => {
-              this.server = this.app.listen(port, () => {
-                Logger.log(`🚀 Proxy server bound to port ${port} after restart`);
-                resolve(port);
-              }).on('error', reject);
-            }, 500);
+              tryListen();
+            }, 1000);
           } else {
+
             reject(err);
           }
         });
