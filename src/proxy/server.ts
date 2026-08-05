@@ -332,17 +332,32 @@ export class ProxyServer {
 
   public listen(port: number): Promise<number> {
     return new Promise((resolve, reject) => {
-      this.server = this.app.listen(port, () => {
-        resolve(port);
-      }).on('error', (err: any) => {
-        if (err.code === 'EADDRINUSE') {
+      const tryListen = () => {
+        this.server = this.app.listen(port, () => {
+          Logger.log(`🚀 Proxy server started successfully on port ${port}`);
           resolve(port);
-        } else {
-          reject(err);
-        }
-      });
+        }).on('error', (err: any) => {
+          if (err.code === 'EADDRINUSE') {
+            Logger.log(`⚠️ Port ${port} is occupied. Force-killing stale process...`);
+            try {
+              const { execSync } = require('node:child_process');
+              execSync(`lsof -ti:${port} | xargs kill -9 2>/dev/null || true`);
+            } catch {}
+            setTimeout(() => {
+              this.server = this.app.listen(port, () => {
+                Logger.log(`🚀 Proxy server bound to port ${port} after restart`);
+                resolve(port);
+              }).on('error', reject);
+            }, 500);
+          } else {
+            reject(err);
+          }
+        });
+      };
+      tryListen();
     });
   }
+
 
   public close(): Promise<void> {
     return new Promise((resolve) => {
