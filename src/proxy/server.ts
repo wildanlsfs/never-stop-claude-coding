@@ -189,10 +189,52 @@ export class ProxyServer {
           return;
         }
 
-        Logger.log(`✅ Received HTTP ${openAIRes.status} response from ${providerName} in ${Date.now() - startTime}ms`);
+        // --- Smart Auto-Retry with tool_choice=required if 9Router returns end_turn during tool execution loops ---
+        if (req.body.stream && openAIReq.tools && openAIReq.tools.length > 0) {
+          const rawBody = await openAIRes.text();
+          const hasToolCall = rawBody.includes('"tool_calls"') || rawBody.includes('"function_call"');
+          const hasEndTurn = rawBody.includes('"finish_reason":"stop"') || rawBody.includes('"finish_reason": "stop"');
 
+          const restream = (bodyText: string) => {
+            const sseStream = new OpenAIToAnthropicSseStream(res, req.body.model);
+            sseStream.init();
+            for (const line of bodyText.split('\n')) {
+              const trimmed = line.trim();
+              if (!trimmed || trimmed.startsWith(':')) continue;
+              if (trimmed === 'data: [DONE]') { sseStream.finish('stop'); break; }
+              if (trimmed.startsWith('data: ')) {
+                try { sseStream.processChunk(JSON.parse(trimmed.slice(6))); } catch {}
+              }
+            }
+            if (!res.writableEnded) sseStream.finish('stop');
+          };
+
+          if (hasEndTurn && !hasToolCall) {
+            Logger.log(`🔁 [auto-retry] 9Router returned end_turn with no tool calls — retrying with tool_choice=required`);
+            try {
+              const retryRes = await doFetch({ ...openAIReq, tool_choice: 'required' });
+              if (retryRes.ok) {
+                const retryBody = await retryRes.text();
+                const retryHasToolCall = retryBody.includes('"tool_calls"') || retryBody.includes('"function_call"');
+                if (retryHasToolCall) {
+                  Logger.log(`✅ [auto-retry] Retry succeeded — forwarding tool_choice=required response`);
+                  restream(retryBody);
+                  return;
+                }
+              }
+            } catch (e: any) {
+              Logger.log(`⚠️ [auto-retry] Retry fetch error: ${e.message}`);
+            }
+            restream(rawBody);
+            return;
+          } else {
+            restream(rawBody);
+            return;
+          }
+        }
 
         if (req.body.stream) {
+
           const sseStream = new OpenAIToAnthropicSseStream(res, req.body.model);
           sseStream.init();
 
