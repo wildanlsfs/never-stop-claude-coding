@@ -31,6 +31,7 @@ describe('Anthropic to OpenAI Protocol Translator', () => {
   it('translates tools definition and tool_use / tool_result turns', () => {
     const anthropicReq: AnthropicMessagesRequest = {
       model: 'claude-3-5-sonnet-20241022',
+      system: 'You are a helpful coding assistant.',
       tools: [
         {
           name: 'Bash',
@@ -128,9 +129,12 @@ describe('Anthropic to OpenAI Protocol Translator', () => {
     expect(anthropicRes.type).toBe('message');
     expect(anthropicRes.role).toBe('assistant');
     expect(anthropicRes.stop_reason).toBe('tool_use');
-    expect(anthropicRes.content).toHaveLength(1);
-    expect(anthropicRes.content[0].type).toBe('tool_use');
-    expect(anthropicRes.content[0].name).toBe('Bash');
-    expect(anthropicRes.content[0].input).toEqual({ command: 'pwd' });
+    // Text preamble is preserved alongside the tool_use block (chain-of-thought
+    // reasoning carries across turns), so both blocks are expected here.
+    expect(anthropicRes.content).toHaveLength(2);
+    expect(anthropicRes.content[0]).toEqual({ type: 'text', text: 'Here is your file list' });
+    expect(anthropicRes.content[1].type).toBe('tool_use');
+    expect(anthropicRes.content[1].name).toBe('Bash');
+    expect(anthropicRes.content[1].input).toEqual({ command: 'pwd' });
   });
 });

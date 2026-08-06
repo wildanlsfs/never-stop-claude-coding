@@ -221,7 +221,11 @@ export class OpenAIToAnthropicSseStream {
 
   public finish(finishReason: string = 'stop') {
     if (this.isFinished || this.res.writableEnded) return;
-    this.isFinished = true;
+    // NOTE: isFinished is intentionally set at the END of this method, not here.
+    // emitEvent() guards on isFinished, so flipping it before closeCurrentBlock()/
+    // message_delta/message_stop below would silently swallow the tool_use block's
+    // final input_json_delta, content_block_stop, message_delta, and message_stop —
+    // truncating every tool-call stream right after content_block_start.
 
     this.closeCurrentBlock();
 
@@ -245,6 +249,8 @@ export class OpenAIToAnthropicSseStream {
     this.emitEvent('message_stop', {
       type: 'message_stop',
     });
+
+    this.isFinished = true;
 
     if (!this.res.writableEnded) {
       this.res.end();
