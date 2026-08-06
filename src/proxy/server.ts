@@ -209,7 +209,9 @@ export class ProxyServer {
             if (!res.writableEnded) sseStream.finish('stop');
           };
 
-          if (hasEndTurn && !hasToolCall) {
+          const shouldForceToolLoop = hasEndTurn && !hasToolCall && this.isContinuingToolLoop(req.body.messages);
+
+          if (shouldForceToolLoop) {
             // Try tool_choice=required retry
             for (let attempt = 1; attempt <= 3; attempt++) {
               Logger.log(`🔁 [auto-retry] 9Router returned end_turn with no tool calls — retry ${attempt}/3 with tool_choice=required`);
@@ -335,6 +337,26 @@ export class ProxyServer {
         });
       }
     });
+  }
+
+  /**
+   * True only when the conversation is actively mid tool-execution loop — i.e. the
+   * last message is a user turn carrying tool_result block(s), meaning the model
+   * just received tool output and is expected to keep acting on it.
+   *
+   * This is deliberately narrow: a fresh conversational turn (e.g. "hi") has no
+   * prior tool_result, and a plain end_turn/no-tool-call response to it is a
+   * perfectly valid answer, not a stall. Without this check, every non-tool-call
+   * reply — including ordinary chit-chat — got its real text discarded and
+   * replaced by a forced tool_choice=required retry loop and, on failure, a fake
+   * synthetic Bash keepalive, which itself provokes more plain-text replies and
+   * loops indefinitely without ever surfacing an answer to the user.
+   */
+  private isContinuingToolLoop(messages: any): boolean {
+    if (!Array.isArray(messages) || messages.length === 0) return false;
+    const last = messages[messages.length - 1];
+    if (!last || last.role !== 'user' || !Array.isArray(last.content)) return false;
+    return last.content.some((b: any) => b?.type === 'tool_result');
   }
 
   private async forwardToAnthropic(req: Request): Promise<globalThis.Response> {
