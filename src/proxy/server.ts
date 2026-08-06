@@ -77,17 +77,29 @@ export class ProxyServer {
               }
             }
 
-            if (req.body.stream && upstreamResponse.body) {
-              const reader = (upstreamResponse.body as any).getReader();
-              while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                res.write(value);
+            // Once we start writing the real Anthropic response to the client, we must
+            // NEVER fall through to the fallback provider on this same connection — if
+            // the stream dies partway through (network blip, reset, anything), appending
+            // a second (fallback) SSE response after already-sent real Claude bytes would
+            // corrupt the output into a garbled mix of real + fallback content. Catch any
+            // mid-stream failure here, locally, and just end the connection instead of
+            // letting it propagate to the outer catch that leads to fallback.
+            try {
+              if (req.body.stream && upstreamResponse.body) {
+                const reader = (upstreamResponse.body as any).getReader();
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  res.write(value);
+                }
+                res.end();
+              } else {
+                const data = await upstreamResponse.json();
+                res.json(data);
               }
-              res.end();
-            } else {
-              const data = await upstreamResponse.json();
-              res.json(data);
+            } catch (streamErr: any) {
+              Logger.log(`❌ Anthropic stream failed mid-response (${streamErr.message}) — real Claude output already sent, ending connection instead of appending fallback output`);
+              if (!res.writableEnded) res.end();
             }
             return;
           }
@@ -110,17 +122,24 @@ export class ProxyServer {
                       res.setHeader(key, val);
                     }
                   }
-                  if (req.body.stream && retryResponse.body) {
-                    const reader = (retryResponse.body as any).getReader();
-                    while (true) {
-                      const { done, value } = await reader.read();
-                      if (done) break;
-                      res.write(value);
+                  // Same rule as the primary path: once real bytes start going to the
+                  // client, never fall through to fallback on this connection.
+                  try {
+                    if (req.body.stream && retryResponse.body) {
+                      const reader = (retryResponse.body as any).getReader();
+                      while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        res.write(value);
+                      }
+                      res.end();
+                    } else {
+                      const data = await retryResponse.json();
+                      res.json(data);
                     }
-                    res.end();
-                  } else {
-                    const data = await retryResponse.json();
-                    res.json(data);
+                  } catch (streamErr: any) {
+                    Logger.log(`❌ Rotated-account stream failed mid-response (${streamErr.message}) — ending connection instead of appending fallback output`);
+                    if (!res.writableEnded) res.end();
                   }
                   return;
                 } else {
@@ -140,6 +159,16 @@ export class ProxyServer {
         } catch (err: any) {
           Logger.log(`❌ Primary Anthropic request failed: ${err.message} — falling back to fallback provider`);
         }
+      }
+
+      // Hard safety net: never write a second (fallback) response on a connection
+      // that already has a real Anthropic response started on it, from any path
+      // above. Two responses on one connection would corrupt the SSE stream into
+      // a garbled mix of real + fallback content.
+      if (res.headersSent) {
+        Logger.log('⚠️ Response already started to client — aborting before fallback to avoid corrupting the stream');
+        if (!res.writableEnded) res.end();
+        return;
       }
 
       // 2. Fallback / Direct Mode to OpenAI-compatible endpoint (e.g. 9Router / OpenRouter / DeepSeek)
