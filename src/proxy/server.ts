@@ -48,6 +48,19 @@ export class ProxyServer {
 
       Logger.log(`📥 Received POST /v1/messages | model: ${req.body.model} | stream: ${!!req.body.stream} | prompt: "${userPromptSnippet.slice(0, 120)}"`, isVerbose);
 
+      // Claude Code sends an internal startup probe whose entire message content is
+      // the literal string "quota" — not a real conversational turn. It reliably
+      // gets back a bare {"type":"rate_limit_error","message":"Error"} with NONE of
+      // Anthropic's usual anthropic-ratelimit-*/retry-after headers (a real rate
+      // limit always carries those), and it has zero effect on whether the very
+      // next real message succeeds. Treating its 429 as a genuine rate limit was
+      // triggering cux rotation, a "switched to fallback" desktop notification, and
+      // routing to combo for a request that was never actually about your usage —
+      // making it look like the proxy keeps failing to reach real Claude when it
+      // isn't. Detect it and just relay Anthropic's real response as-is, without
+      // running it through the rate-limit/fallback pipeline meant for real turns.
+      const isInternalQuotaProbe = userPromptSnippet.trim() === 'quota';
+
       // Fast HTTP 404 Intercept for Claude Code internal SUGGESTION MODE so it never stops main tool turns
       if (userPromptSnippet.includes('[SUGGESTION MODE')) {
         Logger.log('💡 [SUGGESTION MODE] Intercepted — returning HTTP 404 to preserve active tool loop');
@@ -104,12 +117,43 @@ export class ProxyServer {
             return;
           }
 
+          if (isInternalQuotaProbe) {
+            Logger.log(`ℹ️ [quota-probe] Anthropic returned HTTP ${upstreamResponse.status} for the internal probe — relaying as-is, not treated as a real rate limit (no cux rotation / fallback triggered)`);
+            res.status(upstreamResponse.status);
+            for (const [key, val] of upstreamResponse.headers.entries()) {
+              if (key.toLowerCase() !== 'content-encoding' && key.toLowerCase() !== 'content-length') {
+                res.setHeader(key, val);
+              }
+            }
+            try {
+              const data = await upstreamResponse.json();
+              res.json(data);
+            } catch {
+              res.end();
+            }
+            return;
+          }
+
           if ([429, 529, 403].includes(upstreamResponse.status)) {
-            Logger.log(`⚠️ Anthropic returned HTTP ${upstreamResponse.status} Rate Limit!`);
+            // Log the actual error body AND Anthropic's rate-limit headers — a 429
+            // can mean several different things (long-term usage quota, short-term
+            // requests-per-minute, tokens-per-minute, overloaded servers) and the
+            // error body's "message" field is often just "Error" with no detail.
+            // The anthropic-ratelimit-* / retry-after headers carry the real
+            // specifics (which limit, how many remain, when it resets).
+            let rateLimitBody = '';
+            try { rateLimitBody = (await upstreamResponse.clone().text()).slice(0, 400); } catch {}
+            const rlHeaders: Record<string, string> = {};
+            for (const [key, val] of upstreamResponse.headers.entries()) {
+              if (key.toLowerCase().startsWith('anthropic-ratelimit') || key.toLowerCase() === 'retry-after') {
+                rlHeaders[key] = val;
+              }
+            }
+            Logger.log(`⚠️ Anthropic returned HTTP ${upstreamResponse.status} Rate Limit! Body: ${rateLimitBody} | Headers: ${JSON.stringify(rlHeaders)}`);
 
             if (config.cux.enabled && config.cux.autoRotateOnRateLimit && CuxManager.isInstalled()) {
               Logger.log('🔄 Triggering cux account rotation...');
-              const rotated = CuxManager.rotate();
+              const rotated = await CuxManager.rotate();
               if (rotated) {
                 Logger.log('🔄 Retrying request with rotated cux account...');
                 Logger.notify('nscc', 'Claude account rate limit hit. Switched to next cux account.');

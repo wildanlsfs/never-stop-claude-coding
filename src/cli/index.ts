@@ -76,8 +76,13 @@ program
     // Ensure background proxy is running silently
     await ensureProxyRunning(proxyPort);
 
-    const commandToRun = 'claude';
-    Logger.log(`nscc starting session on port ${proxyPort} (forceFallback: ${config.fallback.forceFallback})`);
+    // Launch through cux's wrapper (not plain `claude`) whenever cux integration is
+    // enabled and installed — `cux switch`/`cux force-switch` can only rotate an
+    // *active cux-wrapped session*; a directly-spawned `claude` process was never
+    // visible to cux at all, so account rotation could never actually do anything
+    // regardless of how many accounts were registered.
+    const commandToRun = config.cux.enabled ? CuxManager.getCommand() : 'claude';
+    Logger.log(`nscc starting session on port ${proxyPort} (forceFallback: ${config.fallback.forceFallback}, launcher: ${commandToRun})`);
 
     const childEnv = {
       ...process.env,
