@@ -103,7 +103,13 @@ export class ProxyServer {
                 Logger.notify('nscc', 'Claude account rate limit hit. Switched to next cux account.');
                 const retryResponse = await this.forwardToAnthropic(req);
                 if (retryResponse.ok) {
+                  Logger.log(`✅ Rotated cux account succeeded (HTTP ${retryResponse.status}) — using real Claude response`);
                   res.status(retryResponse.status);
+                  for (const [key, val] of retryResponse.headers.entries()) {
+                    if (key.toLowerCase() !== 'content-encoding' && key.toLowerCase() !== 'content-length') {
+                      res.setHeader(key, val);
+                    }
+                  }
                   if (req.body.stream && retryResponse.body) {
                     const reader = (retryResponse.body as any).getReader();
                     while (true) {
@@ -112,14 +118,27 @@ export class ProxyServer {
                       res.write(value);
                     }
                     res.end();
-                    return;
+                  } else {
+                    const data = await retryResponse.json();
+                    res.json(data);
                   }
+                  return;
+                } else {
+                  Logger.log(`⚠️ Rotated account retry also failed (HTTP ${retryResponse.status}) — falling back to fallback provider`);
                 }
+              } else {
+                Logger.log('⚠️ cux rotation failed or no accounts left in pool — falling back to fallback provider');
               }
             }
+          } else if (!upstreamResponse.ok) {
+            // Any other non-2xx status is not a rate limit — log it explicitly so
+            // falling back to the configured provider is never a silent mystery.
+            let errBody = '';
+            try { errBody = (await upstreamResponse.text()).slice(0, 300); } catch {}
+            Logger.log(`⚠️ Anthropic returned unexpected HTTP ${upstreamResponse.status} (not a rate limit) — falling back: ${errBody}`);
           }
         } catch (err: any) {
-          Logger.log(`Primary Anthropic request failed: ${err.message}`, isVerbose);
+          Logger.log(`❌ Primary Anthropic request failed: ${err.message} — falling back to fallback provider`);
         }
       }
 
@@ -359,18 +378,29 @@ export class ProxyServer {
     return last.content.some((b: any) => b?.type === 'tool_result');
   }
 
-  private async forwardToAnthropic(req: Request): Promise<globalThis.Response> {
-    const headers: Record<string, string> = {
-      'content-type': 'application/json',
-      'anthropic-version': (req.headers['anthropic-version'] as string) || '2023-06-01',
-    };
+  // Headers that must NOT be forwarded as-is: hop-by-hop / connection-specific
+  // headers describing the incoming request to *this* proxy, not the outgoing
+  // one to Anthropic (fetch sets its own Host/Content-Length, and re-sending a
+  // client Connection/Accept-Encoding header can break the upstream request).
+  private static readonly SKIP_FORWARD_HEADERS = new Set([
+    'host', 'content-length', 'connection', 'accept-encoding', 'transfer-encoding',
+  ]);
 
-    if (req.headers['x-api-key']) {
-      headers['x-api-key'] = req.headers['x-api-key'] as string;
+  private async forwardToAnthropic(req: Request): Promise<globalThis.Response> {
+    // Forward every header Claude Code actually sent (anthropic-beta feature
+    // flags, user-agent, x-app, etc.) instead of a hardcoded allowlist — Claude
+    // Code sends fields like `context_management` in the request body that are
+    // only valid when paired with a matching anthropic-beta header; dropping
+    // that header causes Anthropic to reject the request with a 400 that has
+    // nothing to do with rate limits, silently triggering fallback.
+    const headers: Record<string, string> = {};
+    for (const [key, val] of Object.entries(req.headers)) {
+      if (val === undefined) continue;
+      if (ProxyServer.SKIP_FORWARD_HEADERS.has(key.toLowerCase())) continue;
+      headers[key] = Array.isArray(val) ? val.join(', ') : val;
     }
-    if (req.headers['authorization']) {
-      headers['authorization'] = req.headers['authorization'] as string;
-    }
+    headers['content-type'] = 'application/json';
+    headers['anthropic-version'] = (req.headers['anthropic-version'] as string) || '2023-06-01';
 
     return fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
