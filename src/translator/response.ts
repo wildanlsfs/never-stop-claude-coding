@@ -7,14 +7,25 @@ export function translateOpenAIResponseToAnthropic(openAIRes: any, requestModel:
 
   const content: AnthropicContentBlock[] = [];
 
-  const textContent = message?.content || message?.reasoning_content || message?.thinking;
+  const realContent: string | undefined = message?.content;
+  const reasoningContent: string | undefined = message?.reasoning_content || message?.thinking;
   const hasToolCalls = message?.tool_calls && Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
 
-  // Always preserve text reasoning so the model retains its chain-of-thought context across turns
-  if (textContent && textContent.trim()) {
+  // Preserve chain-of-thought reasoning (so the model retains context across turns), but
+  // clearly label and separate it from the actual reply — otherwise it reads as if the
+  // model's internal monologue *is* the answer (e.g. a plain "hi" surfacing the model's
+  // full deliberation instead of just its greeting back).
+  const textParts: string[] = [];
+  if (reasoningContent && reasoningContent.trim()) {
+    textParts.push(`💭 Thinking:\n${reasoningContent.trim()}`);
+  }
+  if (realContent && realContent.trim()) {
+    textParts.push(realContent.trim());
+  }
+  if (textParts.length > 0) {
     content.push({
       type: 'text',
-      text: textContent,
+      text: textParts.join('\n\n'),
     });
   }
 

@@ -9,6 +9,7 @@ export class OpenAIToAnthropicSseStream {
 
   private currentBlockIndex = -1;
   private currentBlockType: 'text' | 'tool_use' | null = null;
+  private currentTextKind: 'reasoning' | 'content' | null = null;
   private activeToolIndex: number | null = null;
   private currentToolCallId: string | null = null;
   private currentToolName: string | null = null;
@@ -110,20 +111,35 @@ export class OpenAIToAnthropicSseStream {
       }
     }
 
-    // Handle text delta (preserve chain-of-thought reasoning alongside tool calls)
-    const textChunk = delta?.content ?? delta?.reasoning_content ?? delta?.thinking ?? delta?.text;
+    // Handle text delta (preserve chain-of-thought reasoning alongside tool calls, but
+    // clearly label and isolate it in its own block so it isn't mistaken for the actual
+    // reply — e.g. a plain "hi" surfacing the model's full deliberation instead of just
+    // its greeting back).
+    const contentChunk = delta?.content;
+    const reasoningChunk = delta?.reasoning_content ?? delta?.thinking ?? delta?.text;
+    const textChunk = contentChunk || reasoningChunk;
+    const textKind: 'reasoning' | 'content' = contentChunk ? 'content' : 'reasoning';
 
     if (textChunk) {
-      if (this.currentBlockType !== 'text') {
+      if (this.currentBlockType !== 'text' || this.currentTextKind !== textKind) {
         this.closeCurrentBlock();
         this.currentBlockIndex++;
         this.currentBlockType = 'text';
+        this.currentTextKind = textKind;
 
         this.emitEvent('content_block_start', {
           type: 'content_block_start',
           index: this.currentBlockIndex,
           content_block: { type: 'text', text: '' },
         });
+
+        if (textKind === 'reasoning') {
+          this.emitEvent('content_block_delta', {
+            type: 'content_block_delta',
+            index: this.currentBlockIndex,
+            delta: { type: 'text_delta', text: '💭 Thinking:\n' },
+          });
+        }
       }
 
       this.outputTokens++;
@@ -213,6 +229,7 @@ export class OpenAIToAnthropicSseStream {
         index: this.currentBlockIndex,
       });
       this.currentBlockType = null;
+      this.currentTextKind = null;
       this.activeToolIndex = null;
       this.currentToolName = null;
       this.currentToolArgs = '';
