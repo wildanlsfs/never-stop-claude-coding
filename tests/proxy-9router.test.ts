@@ -239,6 +239,27 @@ describe('ProxyServer <-> 9Router integration', () => {
       }),
     });
     expect(last9RouterReqBody.model).toBe('kr/claude-sonnet-4.5');
+
+    // 5. Claude Code multi-block format with <system-reminder> and <command-name> XML
+    const xmlRes = await fetch(`http://127.0.0.1:${proxyPort}/s/sessC/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-5-5',
+        max_tokens: 1024,
+        stream: false,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: '<system-reminder>Some context reminder</system-reminder>' },
+            { type: 'text', text: '<command-message>proxy-model</command-message>\n<command-name>/proxy-model</command-name>\n<command-args>3</command-args>' },
+          ],
+        }],
+      }),
+    });
+    expect(xmlRes.status).toBe(200);
+    const xmlJson: any = await xmlRes.json();
+    expect(xmlJson.content[0].text).toContain('combo');
   });
 
   it('omits tools field instead of sending empty array when all tools are filtered', () => {

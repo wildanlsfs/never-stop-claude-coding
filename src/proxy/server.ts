@@ -3,6 +3,7 @@ import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { ConfigManager, normalizeOpenAIBaseUrl } from '../config/manager.js';
 import { CuxManager } from '../cux/manager.js';
 import { translateAnthropicRequestToOpenAI } from '../translator/request.js';
@@ -24,9 +25,17 @@ export class ProxyServer {
   }
 
   private setupRoutes() {
+    const buildMtime = (() => {
+      try {
+        return Math.floor(fs.statSync(fileURLToPath(import.meta.url)).mtimeMs);
+      } catch {
+        return 0;
+      }
+    })();
+
     // Health check
     this.app.get('/health', (_req: Request, res: Response) => {
-      res.json({ status: 'ok', proxy: 'nscc' });
+      res.json({ status: 'ok', proxy: 'nscc', buildMtime });
     });
 
     // Handle Anthropic Messages API (supports /s/:sessionId and /m/:sessionModel prefixes)
@@ -89,9 +98,10 @@ export class ProxyServer {
       }
 
       // Intercept /proxy-model slash command sent from inside Claude Code chat
-      const trimmedPrompt = userPromptSnippet.trim();
-      if (/^\/proxy-model(?:\s|$)/i.test(trimmedPrompt)) {
-        await this.handleProxyModelCommand(req, res, trimmedPrompt, sessionId, activeFallbackModel, config);
+      // (supports plain text, multi-block messages with <system-reminder>, and <command-name> XML)
+      const proxyModelArg = this.extractProxyModelArg(lastUserMsg);
+      if (proxyModelArg !== null) {
+        await this.handleProxyModelCommand(req, res, proxyModelArg, sessionId, activeFallbackModel, config);
         return;
       }
 
@@ -475,7 +485,7 @@ export class ProxyServer {
 
     const res = await fetch(`${normalized}/models`, {
       headers,
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(15000),
     });
     if (!res.ok) {
       throw new Error(`HTTP ${res.status} from ${normalized}/models`);
@@ -485,15 +495,46 @@ export class ProxyServer {
     return list.map((m: any) => String(m?.id || m?.name || m)).filter(Boolean);
   }
 
+  private extractProxyModelArg(lastUserMsg: any): string | null {
+    if (!lastUserMsg) return null;
+
+    const textBlocks: string[] = [];
+    if (typeof lastUserMsg.content === 'string') {
+      textBlocks.push(lastUserMsg.content);
+    } else if (Array.isArray(lastUserMsg.content)) {
+      for (const b of lastUserMsg.content) {
+        if (b?.type === 'text' && typeof b.text === 'string') {
+          textBlocks.push(b.text);
+        }
+      }
+    }
+
+    for (const raw of textBlocks) {
+      const cleaned = raw.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, '').trim();
+      if (!cleaned) continue;
+
+      if (/<command-name>\s*\/proxy-model\s*<\/command-name>/i.test(cleaned)) {
+        const argsMatch = cleaned.match(/<command-args>([\s\S]*?)<\/command-args>/i);
+        return (argsMatch?.[1] ?? '').trim();
+      }
+
+      const lineMatch = cleaned.match(/(?:^|\n)\/proxy-model(?:\s+([^\n]*))?$/i);
+      if (lineMatch) {
+        return (lineMatch[1] ?? '').trim();
+      }
+    }
+
+    return null;
+  }
+
   private async handleProxyModelCommand(
     req: Request,
     res: Response,
-    trimmedPrompt: string,
+    arg: string,
     sessionId: string,
     activeFallbackModel: string,
     config: ReturnType<typeof ConfigManager.loadConfig>
   ): Promise<void> {
-    const arg = trimmedPrompt.replace(/^\/proxy-model\s*/i, '').trim();
     const isStream = Boolean(req.body.stream);
     const requestModel = req.body.model || 'claude-3-5-sonnet-20241022';
     const isLocalEndpoint = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(config.fallback.baseUrl.trim());
@@ -699,7 +740,7 @@ export class ProxyServer {
           if (err.code === 'EADDRINUSE') {
             Logger.log(`⚠️ Port ${port} is occupied. Force-killing stale process...`);
             try {
-              execSync(`lsof -ti:${port} | xargs kill -9 2>/dev/null || true`);
+              execSync(`lsof -ti:${port} -sTCP:LISTEN | xargs kill -9 2>/dev/null || true`);
             } catch {}
             setTimeout(() => {
               tryListen();

@@ -23,17 +23,31 @@ program
   .description('Never Stop Claude Code - Multi-account rotation & OpenAI/9Router fallback CLI')
   .version('1.5.0');
 
-async function isProxyHealthy(port: number): Promise<boolean> {
+function getExpectedProxyBuildMtime(): number {
+  try {
+    const serverJs = path.join(projectRoot, 'dist/proxy/server.js');
+    return Math.floor(fs.statSync(serverJs).mtimeMs);
+  } catch {
+    return 0;
+  }
+}
+
+async function isProxyHealthy(port: number, requireCurrentBuild = false): Promise<boolean> {
   try {
     const res = await fetch(`http://localhost:${port}/health`, { signal: AbortSignal.timeout(400) });
-    return res.ok;
+    if (!res.ok) return false;
+    if (!requireCurrentBuild) return true;
+    const data: any = await res.json().catch(() => null);
+    const expected = getExpectedProxyBuildMtime();
+    if (!expected) return true;
+    return data?.buildMtime === expected;
   } catch {
     return false;
   }
 }
 
 async function ensureProxyRunning(port: number): Promise<void> {
-  if (await isProxyHealthy(port)) {
+  if (await isProxyHealthy(port, true)) {
     return;
   }
 
@@ -45,10 +59,10 @@ async function ensureProxyRunning(port: number): Promise<void> {
   });
   child.unref();
 
-  // Wait up to 3 seconds for proxy to start up
+  // Wait up to 3 seconds for proxy to start up (ProxyServer.listen kills stale EADDRINUSE listeners)
   for (let i = 0; i < 30; i++) {
     await new Promise((resolve) => setTimeout(resolve, 100));
-    if (await isProxyHealthy(port)) {
+    if (await isProxyHealthy(port, true)) {
       return;
     }
   }
