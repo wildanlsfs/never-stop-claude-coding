@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { spawn, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ConfigManager, PROVIDER_PRESETS, normalizeOpenAIBaseUrl } from '../config/manager.js';
@@ -49,6 +51,28 @@ async function ensureProxyRunning(port: number): Promise<void> {
     if (await isProxyHealthy(port)) {
       return;
     }
+  }
+}
+
+function ensureProxyModelSlashCommand(): void {
+  try {
+    const commandsDir = path.join(os.homedir(), '.claude', 'commands');
+    const commandFile = path.join(commandsDir, 'proxy-model.md');
+    if (fs.existsSync(commandFile)) return;
+    fs.mkdirSync(commandsDir, { recursive: true });
+    fs.writeFileSync(
+      commandFile,
+      [
+        '---',
+        'description: List or switch the active nscc proxy fallback model for this session',
+        '---',
+        '/proxy-model $ARGUMENTS',
+        '',
+      ].join('\n'),
+      'utf-8'
+    );
+  } catch {
+    // Non-fatal if ~/.claude/commands is not writable
   }
 }
 
@@ -102,11 +126,13 @@ program
     // visible to cux at all, so account rotation could never actually do anything
     // regardless of how many accounts were registered.
     const commandToRun = config.cux.enabled ? CuxManager.getCommand() : 'claude';
+    const sessionId = randomUUID().slice(0, 8);
     const sessionModel = resolveSessionModel(options.model);
     const proxyBaseUrl = sessionModel
-      ? `http://localhost:${proxyPort}/m/${encodeURIComponent(sessionModel)}`
-      : `http://localhost:${proxyPort}`;
-    Logger.log(`nscc starting session on port ${proxyPort} (forceFallback: ${config.fallback.forceFallback}, launcher: ${commandToRun}, sessionModel: ${sessionModel ?? 'default'})`);
+      ? `http://localhost:${proxyPort}/s/${sessionId}/m/${encodeURIComponent(sessionModel)}`
+      : `http://localhost:${proxyPort}/s/${sessionId}`;
+    ensureProxyModelSlashCommand();
+    Logger.log(`nscc starting session ${sessionId} on port ${proxyPort} (forceFallback: ${config.fallback.forceFallback}, launcher: ${commandToRun}, sessionModel: ${sessionModel ?? 'default'})`);
 
     const childEnv = {
       ...process.env,

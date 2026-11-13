@@ -151,7 +151,11 @@ NSCC_MODEL="combo" nscc -f
 # Or create a .nscc.json file in your project root:
 # { "model": "kr/claude-sonnet-4.5" }
 ```
-Priority order: `-m / --model` flag > `NSCC_MODEL` env var > `.nscc.json` in current directory > global `~/.nscc/config.json`.
+Priority order: `/proxy-model` in-chat override > `-m / --model` flag > `NSCC_MODEL` env var > `.nscc.json` in current directory > global `~/.nscc/config.json`.
+
+You can also switch models **mid-chat** inside Claude Code (for the current session only) using:
+- `/proxy-model` — list available models from your configured provider (e.g. 9Router)
+- `/proxy-model <number>` or `/proxy-model <model_id>` — switch the active session's model immediately
 
 ---
 

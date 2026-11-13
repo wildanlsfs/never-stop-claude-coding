@@ -27,6 +27,18 @@ describe('ProxyServer <-> 9Router integration', () => {
       let body = '';
       req.on('data', (chunk) => { body += chunk; });
       req.on('end', () => {
+        if (req.url === '/v1/models' && req.method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            data: [
+              { id: 'kr/claude-sonnet-4.5' },
+              { id: 'deepseek/deepseek-chat' },
+              { id: 'combo' },
+            ],
+          }));
+          return;
+        }
+
         if (req.url === '/v1/chat/completions' && req.method === 'POST') {
           last9RouterReqBody = JSON.parse(body);
           last9RouterAuthHeader = req.headers['authorization'];
@@ -165,6 +177,68 @@ describe('ProxyServer <-> 9Router integration', () => {
     expect(res.status).toBe(200);
     expect(last9RouterReqBody.model).toBe(overrideModel);
     expect(ConfigManager.loadConfig().fallback.model).toBe('kr/claude-sonnet-4.5');
+  });
+
+  it('lists and switches model per session via /proxy-model without affecting other sessions', async () => {
+    nextMockMode = 'non-stream';
+
+    // 1. List models in session A (streaming)
+    const listRes = await fetch(`http://127.0.0.1:${proxyPort}/s/sessA/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-3-5-sonnet-20241022',
+        max_tokens: 1024,
+        stream: true,
+        messages: [{ role: 'user', content: '/proxy-model' }],
+      }),
+    });
+    expect(listRes.status).toBe(200);
+    const listText = await listRes.text();
+    expect(listText).toContain('1. `kr/claude-sonnet-4.5`');
+    expect(listText).toContain('2. `deepseek/deepseek-chat`');
+    expect(listText).toContain('3. `combo`');
+
+    // 2. Switch session A to #2 (deepseek/deepseek-chat)
+    const switchRes = await fetch(`http://127.0.0.1:${proxyPort}/s/sessA/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-3-5-sonnet-20241022',
+        max_tokens: 1024,
+        stream: false,
+        messages: [{ role: 'user', content: '/proxy-model 2' }],
+      }),
+    });
+    expect(switchRes.status).toBe(200);
+    const switchJson: any = await switchRes.json();
+    expect(switchJson.content[0].text).toContain('deepseek/deepseek-chat');
+
+    // 3. Subsequent request in session A uses deepseek/deepseek-chat
+    await fetch(`http://127.0.0.1:${proxyPort}/s/sessA/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-3-5-sonnet-20241022',
+        max_tokens: 1024,
+        stream: false,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    expect(last9RouterReqBody.model).toBe('deepseek/deepseek-chat');
+
+    // 4. Session B is unaffected and still uses default kr/claude-sonnet-4.5
+    await fetch(`http://127.0.0.1:${proxyPort}/s/sessB/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-3-5-sonnet-20241022',
+        max_tokens: 1024,
+        stream: false,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    expect(last9RouterReqBody.model).toBe('kr/claude-sonnet-4.5');
   });
 
   it('omits tools field instead of sending empty array when all tools are filtered', () => {

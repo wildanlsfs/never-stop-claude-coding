@@ -13,6 +13,8 @@ import { Logger } from '../utils/logger.js';
 export class ProxyServer {
   private app = express();
   private server: http.Server | null = null;
+  private sessionModels = new Map<string, string>();
+  private lastFetchedModels = new Map<string, string[]>();
 
 
 
@@ -27,12 +29,22 @@ export class ProxyServer {
       res.json({ status: 'ok', proxy: 'nscc' });
     });
 
-    // Handle Anthropic Messages API (supports optional /m/:sessionModel prefix for per-session model override)
-    this.app.post(['/v1/messages', '/messages', '/m/:sessionModel/v1/messages', '/m/:sessionModel/messages'], async (req: Request, res: Response) => {
+    // Handle Anthropic Messages API (supports /s/:sessionId and /m/:sessionModel prefixes)
+    this.app.post([
+      '/v1/messages',
+      '/messages',
+      '/m/:sessionModel/v1/messages',
+      '/m/:sessionModel/messages',
+      '/s/:sessionId/v1/messages',
+      '/s/:sessionId/messages',
+      '/s/:sessionId/m/:sessionModel/v1/messages',
+      '/s/:sessionId/m/:sessionModel/messages',
+    ], async (req: Request, res: Response) => {
       const startTime = Date.now();
       const config = ConfigManager.loadConfig();
-      const sessionModel = req.params.sessionModel ? decodeURIComponent(req.params.sessionModel) : undefined;
-      const activeFallbackModel = sessionModel || config.fallback.model;
+      const sessionId = req.params.sessionId || 'default';
+      const initialSessionModel = req.params.sessionModel ? decodeURIComponent(req.params.sessionModel) : undefined;
+      const activeFallbackModel = this.sessionModels.get(sessionId) || initialSessionModel || config.fallback.model;
       const isVerbose = config.proxy.verbose;
 
       const lastUserMsg = Array.isArray(req.body.messages)
@@ -73,6 +85,13 @@ export class ProxyServer {
             message: 'Suggestion mode is disabled in nscc proxy to ensure continuous tool execution.',
           },
         });
+        return;
+      }
+
+      // Intercept /proxy-model slash command sent from inside Claude Code chat
+      const trimmedPrompt = userPromptSnippet.trim();
+      if (/^\/proxy-model(?:\s|$)/i.test(trimmedPrompt)) {
+        await this.handleProxyModelCommand(req, res, trimmedPrompt, sessionId, activeFallbackModel, config);
         return;
       }
 
@@ -236,10 +255,11 @@ export class ProxyServer {
 
       const providerName = config.fallback.provider.toUpperCase();
       const normalizedBaseUrl = normalizeOpenAIBaseUrl(config.fallback.baseUrl);
+      const hasSessionOverride = this.sessionModels.has(sessionId) || Boolean(initialSessionModel);
       if (isForceFallback) {
-        Logger.log(`🔀 [Force Fallback] Routing directly to ${providerName} (${normalizedBaseUrl}) with model: ${activeFallbackModel}${sessionModel ? ' (session override)' : ''}`);
+        Logger.log(`🔀 [Force Fallback] Routing directly to ${providerName} (${normalizedBaseUrl}) with model: ${activeFallbackModel}${hasSessionOverride ? ' (session override)' : ''}`);
       } else {
-        Logger.log(`🔀 Switching seamlessly to ${providerName} fallback (${normalizedBaseUrl}) with model: ${activeFallbackModel}${sessionModel ? ' (session override)' : ''}`);
+        Logger.log(`🔀 Switching seamlessly to ${providerName} fallback (${normalizedBaseUrl}) with model: ${activeFallbackModel}${hasSessionOverride ? ' (session override)' : ''}`);
         Logger.notify('nscc Failover', `Switched seamlessly to ${providerName} (${activeFallbackModel})`);
       }
 
@@ -446,6 +466,175 @@ export class ProxyServer {
         });
       }
     });
+  }
+
+  private async fetchProviderModels(baseUrl: string, apiKey: string): Promise<string[]> {
+    const normalized = normalizeOpenAIBaseUrl(baseUrl);
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+
+    const res = await fetch(`${normalized}/models`, {
+      headers,
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} from ${normalized}/models`);
+    }
+    const data: any = await res.json();
+    const list: any[] = data.data || data.models || (Array.isArray(data) ? data : []);
+    return list.map((m: any) => String(m?.id || m?.name || m)).filter(Boolean);
+  }
+
+  private async handleProxyModelCommand(
+    req: Request,
+    res: Response,
+    trimmedPrompt: string,
+    sessionId: string,
+    activeFallbackModel: string,
+    config: ReturnType<typeof ConfigManager.loadConfig>
+  ): Promise<void> {
+    const arg = trimmedPrompt.replace(/^\/proxy-model\s*/i, '').trim();
+    const isStream = Boolean(req.body.stream);
+    const requestModel = req.body.model || 'claude-3-5-sonnet-20241022';
+    const isLocalEndpoint = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(config.fallback.baseUrl.trim());
+    const effectiveApiKey = config.fallback.apiKey || (isLocalEndpoint ? '9router-local' : '');
+
+    if (!arg) {
+      try {
+        const models = await this.fetchProviderModels(config.fallback.baseUrl, effectiveApiKey);
+        this.lastFetchedModels.set(sessionId, models);
+
+        if (models.length === 0) {
+          this.sendSyntheticAnthropicReply(
+            res,
+            requestModel,
+            `Active session model: \`${activeFallbackModel}\`\n\nNo models were returned by ${config.fallback.provider} (${normalizeOpenAIBaseUrl(config.fallback.baseUrl)}/models). You can still set one directly with:\n\`/proxy-model <model_id>\``,
+            isStream
+          );
+          return;
+        }
+
+        const formatted = models
+          .map((id, idx) => `${idx + 1}. \`${id}\`${id === activeFallbackModel ? ' *(active)*' : ''}`)
+          .join('\n');
+
+        this.sendSyntheticAnthropicReply(
+          res,
+          requestModel,
+          `**nscc Proxy Models (${config.fallback.provider.toUpperCase()})**\nActive session model: \`${activeFallbackModel}\`\n\n${formatted}\n\nTo switch model for **this session only**, run:\n\`/proxy-model <number>\` or \`/proxy-model <model_id>\``,
+          isStream
+        );
+      } catch (err: any) {
+        this.sendSyntheticAnthropicReply(
+          res,
+          requestModel,
+          `Active session model: \`${activeFallbackModel}\`\n\nFailed to fetch models from ${normalizeOpenAIBaseUrl(config.fallback.baseUrl)}/models: ${err.message}\nYou can still switch directly with \`/proxy-model <model_id>\`.`,
+          isStream
+        );
+      }
+      return;
+    }
+
+    let chosenModel = arg;
+    if (/^\d+$/.test(arg)) {
+      let cached = this.lastFetchedModels.get(sessionId);
+      if (!cached || cached.length === 0) {
+        try {
+          cached = await this.fetchProviderModels(config.fallback.baseUrl, effectiveApiKey);
+          this.lastFetchedModels.set(sessionId, cached);
+        } catch (err: any) {
+          this.sendSyntheticAnthropicReply(
+            res,
+            requestModel,
+            `Could not resolve model #${arg} because fetching /models failed: ${err.message}`,
+            isStream
+          );
+          return;
+        }
+      }
+      const index = parseInt(arg, 10) - 1;
+      if (index < 0 || index >= cached.length) {
+        this.sendSyntheticAnthropicReply(
+          res,
+          requestModel,
+          `Invalid model number \`${arg}\`. Run \`/proxy-model\` to see valid numbers (1–${cached.length}).`,
+          isStream
+        );
+        return;
+      }
+      chosenModel = cached[index];
+    }
+
+    this.sessionModels.set(sessionId, chosenModel);
+    Logger.log(`🎯 [/proxy-model] Session ${sessionId} switched model to: ${chosenModel}`);
+    this.sendSyntheticAnthropicReply(
+      res,
+      requestModel,
+      `Switched **this session's** proxy fallback model to \`${chosenModel}\` (other sessions and global config unchanged).`,
+      isStream
+    );
+  }
+
+  private sendSyntheticAnthropicReply(res: Response, requestModel: string, text: string, isStream: boolean): void {
+    const msgId = `msg_nscc_${Date.now()}`;
+    if (!isStream) {
+      res.json({
+        id: msgId,
+        type: 'message',
+        role: 'assistant',
+        model: requestModel,
+        content: [{ type: 'text', text }],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+        usage: { input_tokens: 0, output_tokens: 0 },
+      });
+      return;
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+
+    const emit = (event: string, data: any) => {
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    emit('message_start', {
+      type: 'message_start',
+      message: {
+        id: msgId,
+        type: 'message',
+        role: 'assistant',
+        model: requestModel,
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 0, output_tokens: 0 },
+      },
+    });
+    emit('content_block_start', {
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'text', text: '' },
+    });
+    emit('content_block_delta', {
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'text_delta', text },
+    });
+    emit('content_block_stop', {
+      type: 'content_block_stop',
+      index: 0,
+    });
+    emit('message_delta', {
+      type: 'message_delta',
+      delta: { stop_reason: 'end_turn', stop_sequence: null },
+      usage: { output_tokens: 1 },
+    });
+    emit('message_stop', { type: 'message_stop' });
+    res.end();
   }
 
   /**
