@@ -1,8 +1,9 @@
 import express, { Request, Response } from 'express';
+import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
-import { ConfigManager } from '../config/manager.js';
+import { ConfigManager, normalizeOpenAIBaseUrl } from '../config/manager.js';
 import { CuxManager } from '../cux/manager.js';
 import { translateAnthropicRequestToOpenAI } from '../translator/request.js';
 import { translateOpenAIResponseToAnthropic } from '../translator/response.js';
@@ -216,7 +217,10 @@ export class ProxyServer {
       }
 
       // 2. Fallback / Direct Mode to OpenAI-compatible endpoint (e.g. 9Router / OpenRouter / DeepSeek)
-      if (!config.fallback.enabled || !config.fallback.apiKey) {
+      const isLocalEndpoint = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(config.fallback.baseUrl.trim());
+      const effectiveApiKey = config.fallback.apiKey || (isLocalEndpoint ? '9router-local' : '');
+
+      if (!config.fallback.enabled || !effectiveApiKey) {
         Logger.log('❌ Rate limited / Force Fallback active on Anthropic and no fallback API Key configured in ~/.nscc/config.json!');
         Logger.notify('nscc Alert', 'Fallback active & API key is missing.');
         res.status(429).json({
@@ -229,10 +233,11 @@ export class ProxyServer {
       }
 
       const providerName = config.fallback.provider.toUpperCase();
+      const normalizedBaseUrl = normalizeOpenAIBaseUrl(config.fallback.baseUrl);
       if (isForceFallback) {
-        Logger.log(`🔀 [Force Fallback] Routing directly to ${providerName} (${config.fallback.baseUrl}) with model: ${config.fallback.model}`);
+        Logger.log(`🔀 [Force Fallback] Routing directly to ${providerName} (${normalizedBaseUrl}) with model: ${config.fallback.model}`);
       } else {
-        Logger.log(`🔀 Switching seamlessly to ${providerName} fallback (${config.fallback.baseUrl}) with model: ${config.fallback.model}`);
+        Logger.log(`🔀 Switching seamlessly to ${providerName} fallback (${normalizedBaseUrl}) with model: ${config.fallback.model}`);
         Logger.notify('nscc Failover', `Switched seamlessly to ${providerName} (${config.fallback.model})`);
       }
 
@@ -243,17 +248,22 @@ export class ProxyServer {
           config.fallback.maxTokens
         );
 
-        const targetUrl = `${config.fallback.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+        const targetUrl = `${normalizedBaseUrl}/chat/completions`;
 
         Logger.log(`⏳ Sending request to ${providerName} (${targetUrl})...`);
 
+        const isNineRouter =
+          config.fallback.provider.toLowerCase() === '9router' ||
+          normalizedBaseUrl.toLowerCase().includes('9router') ||
+          normalizedBaseUrl.includes(':20128');
+
         const doFetch = async (body: any): Promise<globalThis.Response> => {
-          const extraParams = config.fallback.baseUrl.includes('9router') ? { caveman: false } : {};
+          const extraParams = isNineRouter ? { caveman: false } : {};
           return fetch(targetUrl, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'Authorization': `Bearer ${config.fallback.apiKey}`,
+              'Authorization': `Bearer ${effectiveApiKey}`,
             },
             body: JSON.stringify({ ...body, ...extraParams }),
           });
@@ -282,7 +292,7 @@ export class ProxyServer {
         }
 
         // --- Smart Auto-Retry with tool_choice=required if 9Router returns end_turn during tool execution loops ---
-        if (req.body.stream && openAIReq.tools && openAIReq.tools.length > 0) {
+        if (req.body.stream && openAIReq.tools && openAIReq.tools.length > 0 && this.isContinuingToolLoop(req.body.messages)) {
           const rawBody = await openAIRes.text();
           const hasToolCall = rawBody.includes('"tool_calls"') || rawBody.includes('"function_call"');
           const hasEndTurn = rawBody.includes('"finish_reason":"stop"') || rawBody.includes('"finish_reason": "stop"');
@@ -293,15 +303,16 @@ export class ProxyServer {
             for (const line of bodyText.split('\n')) {
               const trimmed = line.trim();
               if (!trimmed || trimmed.startsWith(':')) continue;
-              if (trimmed === 'data: [DONE]') { sseStream.finish('stop'); break; }
-              if (trimmed.startsWith('data: ')) {
-                try { sseStream.processChunk(JSON.parse(trimmed.slice(6))); } catch {}
+              if (trimmed.startsWith('data:')) {
+                const payload = trimmed.slice(5).trim();
+                if (payload === '[DONE]') { sseStream.finish('stop'); break; }
+                try { sseStream.processChunk(JSON.parse(payload)); } catch {}
               }
             }
             if (!res.writableEnded) sseStream.finish('stop');
           };
 
-          const shouldForceToolLoop = hasEndTurn && !hasToolCall && this.isContinuingToolLoop(req.body.messages);
+          const shouldForceToolLoop = hasEndTurn && !hasToolCall;
 
           if (shouldForceToolLoop) {
             // Try tool_choice=required retry
@@ -374,13 +385,14 @@ export class ProxyServer {
               for (const line of lines) {
                 const trimmed = line.trim();
                 if (!trimmed || trimmed.startsWith(':')) continue;
-                if (trimmed === 'data: [DONE]') {
-                  sseStream.finish('stop');
-                  break readLoop;
-                }
-                if (trimmed.startsWith('data: ')) {
+                if (trimmed.startsWith('data:')) {
+                  const payload = trimmed.slice(5).trim();
+                  if (payload === '[DONE]') {
+                    sseStream.finish('stop');
+                    break readLoop;
+                  }
                   try {
-                    const chunkJson = JSON.parse(trimmed.slice(6));
+                    const chunkJson = JSON.parse(payload);
                     sseStream.processChunk(chunkJson);
                   } catch {
                     // Ignore SSE line parse errors
@@ -391,11 +403,14 @@ export class ProxyServer {
 
             if (done) {
               const trimmedBuf = buffer.trim();
-              if (trimmedBuf.startsWith('data: ') && trimmedBuf !== 'data: [DONE]') {
-                try {
-                  const chunkJson = JSON.parse(trimmedBuf.slice(6));
-                  sseStream.processChunk(chunkJson);
-                } catch {}
+              if (trimmedBuf.startsWith('data:')) {
+                const payload = trimmedBuf.slice(5).trim();
+                if (payload && payload !== '[DONE]') {
+                  try {
+                    const chunkJson = JSON.parse(payload);
+                    sseStream.processChunk(chunkJson);
+                  } catch {}
+                }
               }
               sseStream.finish('stop');
               break readLoop;
@@ -486,13 +501,13 @@ export class ProxyServer {
     return new Promise((resolve, reject) => {
       const tryListen = () => {
         this.server = this.app.listen(port, () => {
-          Logger.log(`🚀 Proxy server started successfully on port ${port}`);
-          resolve(port);
+          const boundPort = (this.server?.address() as any)?.port ?? port;
+          Logger.log(`🚀 Proxy server started successfully on port ${boundPort}`);
+          resolve(boundPort);
         }).on('error', (err: any) => {
           if (err.code === 'EADDRINUSE') {
             Logger.log(`⚠️ Port ${port} is occupied. Force-killing stale process...`);
             try {
-              const { execSync } = require('node:child_process');
               execSync(`lsof -ti:${port} | xargs kill -9 2>/dev/null || true`);
             } catch {}
             setTimeout(() => {

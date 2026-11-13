@@ -3,6 +3,19 @@ import path from 'node:path';
 import os from 'node:os';
 import { ConfigSchema, type NsccConfig } from './schema.js';
 
+export function normalizeOpenAIBaseUrl(baseUrl: string): string {
+  const trimmed = baseUrl.trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '');
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.pathname === '' || parsed.pathname === '/') {
+      return `${trimmed}/v1`;
+    }
+  } catch {
+    // Return trimmed as-is if it's not a valid absolute URL
+  }
+  return trimmed;
+}
+
 export const PROVIDER_PRESETS: Record<string, Partial<NsccConfig['fallback']>> = {
   '9router': {
     provider: '9router',
@@ -87,15 +100,17 @@ export class ConfigManager {
     }
 
     const current = this.loadConfig();
-    const isCustomUrl = current.fallback.baseUrl && !current.fallback.baseUrl.includes('localhost');
-    const isCustomKey = current.fallback.apiKey && current.fallback.apiKey !== '9router-local';
+    const isSameProvider = current.fallback.provider?.toLowerCase() === preset.provider?.toLowerCase();
+    const isKnownPresetUrl = Object.values(PROVIDER_PRESETS).some((p) => p.baseUrl === current.fallback.baseUrl);
+    const hasCustomUrl = isSameProvider && Boolean(current.fallback.baseUrl) && !isKnownPresetUrl;
+    const hasCustomKey = isSameProvider && Boolean(current.fallback.apiKey) && current.fallback.apiKey !== '9router-local';
 
-    // Preserve custom cloud URL and API Key if user configured one
+    // Preserve custom cloud URL/key/model only when re-applying the same provider preset
     const newFallback: Partial<NsccConfig['fallback']> = {
       ...preset,
-      baseUrl: isCustomUrl ? current.fallback.baseUrl : preset.baseUrl,
-      apiKey: isCustomKey ? current.fallback.apiKey : preset.apiKey,
-      model: current.fallback.model !== 'claude-3-5-sonnet' ? current.fallback.model : preset.model,
+      baseUrl: hasCustomUrl ? current.fallback.baseUrl : preset.baseUrl,
+      apiKey: hasCustomKey ? current.fallback.apiKey : (preset.apiKey ?? ''),
+      model: isSameProvider && current.fallback.model ? current.fallback.model : preset.model,
     };
 
     return this.saveConfig({

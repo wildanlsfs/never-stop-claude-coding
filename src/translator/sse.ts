@@ -52,6 +52,27 @@ export class OpenAIToAnthropicSseStream {
   public processChunk(openAIChunk: any) {
     if (this.isFinished || this.res.writableEnded) return;
 
+    if (openAIChunk.error) {
+      const errMsg = openAIChunk.error.message || JSON.stringify(openAIChunk.error);
+      Logger.log(`❌ [stream_error] Upstream returned error chunk: ${errMsg}`);
+      this.closeCurrentBlock();
+      this.currentBlockIndex++;
+      this.currentBlockType = 'text';
+      this.currentTextKind = 'content';
+      this.emitEvent('content_block_start', {
+        type: 'content_block_start',
+        index: this.currentBlockIndex,
+        content_block: { type: 'text', text: '' },
+      });
+      this.emitEvent('content_block_delta', {
+        type: 'content_block_delta',
+        index: this.currentBlockIndex,
+        delta: { type: 'text_delta', text: `\n[Upstream Error]: ${errMsg}` },
+      });
+      this.finish('stop');
+      return;
+    }
+
     const choice = openAIChunk.choices?.[0];
     if (!choice) return;
 
@@ -69,16 +90,18 @@ export class OpenAIToAnthropicSseStream {
       for (const tc of delta.tool_calls) {
         const toolIndex = tc.index ?? 0;
 
-        if (tc.function?.name) {
-          this.currentToolName = tc.function.name;
-        }
-
-        // Open a new tool_use block ONLY when switching to a new tool index
+        // Open a new tool_use block ONLY when switching to a new tool index.
+        // Close the previous block BEFORE updating currentToolName so the closing
+        // block keeps its own tool name.
         if (this.currentBlockType !== 'tool_use' || this.activeToolIndex !== toolIndex) {
           this.closeCurrentBlock();
           this.currentBlockIndex++;
           this.currentBlockType = 'tool_use';
           this.activeToolIndex = toolIndex;
+
+          if (tc.function?.name) {
+            this.currentToolName = tc.function.name;
+          }
 
           // Format tool call ID deterministically so tool_result responses match original OpenAI ID
           this.currentToolCallId = openAiIdToAnthropic(tc.id);
@@ -102,6 +125,8 @@ export class OpenAIToAnthropicSseStream {
             },
           });
 
+        } else if (tc.function?.name) {
+          this.currentToolName = tc.function.name;
         }
 
         if (tc.function?.arguments) {

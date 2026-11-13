@@ -4,7 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ConfigManager, PROVIDER_PRESETS } from '../config/manager.js';
+import { ConfigManager, PROVIDER_PRESETS, normalizeOpenAIBaseUrl } from '../config/manager.js';
 import { CuxManager } from '../cux/manager.js';
 import { ProxyServer } from '../proxy/server.js';
 import { Logger } from '../utils/logger.js';
@@ -245,7 +245,7 @@ program
   .option('-s, --set <model>', 'Set and save selected model')
   .action(async (options) => {
     const config = ConfigManager.loadConfig();
-    const baseUrl = config.fallback.baseUrl.replace(/\/+$/, '');
+    const baseUrl = normalizeOpenAIBaseUrl(config.fallback.baseUrl);
     const apiKey = config.fallback.apiKey;
 
     if (options.set) {

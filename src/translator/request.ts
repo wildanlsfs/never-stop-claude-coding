@@ -19,7 +19,7 @@ export function translateAnthropicRequestToOpenAI(
     if (typeof anthropicReq.system === 'string') {
       systemContent = anthropicReq.system;
     } else if (Array.isArray(anthropicReq.system)) {
-      systemContent = anthropicReq.system.map((b) => b.text).join('\n');
+      systemContent = anthropicReq.system.map((b) => b.text ?? '').filter(Boolean).join('\n');
     }
   }
 
@@ -109,16 +109,19 @@ export function translateAnthropicRequestToOpenAI(
   // 3. Tools Definition & Tool Choice Translation
   let openAITools: OpenAITool[] | undefined;
   if (anthropicReq.tools && anthropicReq.tools.length > 0) {
-    openAITools = anthropicReq.tools
+    const filteredTools = anthropicReq.tools
       .filter((t) => !t.name.startsWith('mcp__claude-in-chrome'))
       .map((t) => ({
-        type: 'function',
+        type: 'function' as const,
         function: {
           name: t.name,
           description: t.description,
           parameters: t.input_schema ?? { type: 'object', properties: {} },
         },
       }));
+    if (filteredTools.length > 0) {
+      openAITools = filteredTools;
+    }
   }
 
 

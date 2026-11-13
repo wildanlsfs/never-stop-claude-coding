@@ -99,7 +99,11 @@ nscc config -p 9router -u "https://9router.example.com/v1" -m "combo" -k "your-9
 For 9Router Local (`http://localhost:20128/v1`, e.g. running 9Router yourself):
 ```bash
 nscc config -p 9router
+# and pick a model or combo from your 9Router instance:
+nscc models
+nscc models --set "kr/claude-sonnet-4.5"
 ```
+> **Tip:** Both `http://localhost:20128` and `http://localhost:20128/v1` work (`nscc` appends `/v1` automatically when needed), and local `localhost`/`127.0.0.1` 9Router instances work without requiring an API key.
 
 #### Option B: OpenRouter
 ```bash
@@ -181,7 +185,7 @@ When using **Force Fallback Mode** (`nscc -f`) with 9Router, OpenRouter, or a cu
 
 ### 1. Model Tool-Calling Adherence (Function Calling)
 - **Rotator & free/flash-tier models** are often optimized for chat responses and may summarize tool output in plain text, returning `finish_reason: "stop"` instead of issuing structured `tool_calls` JSON. This can cause Claude Code to halt mid-task.
-- **Output Compression / Caveman Mode**: 9Router features output compression ("Caveman mode"), which converts tool call JSON into plain text summaries. `nscc` automatically passes `caveman: false` for 9Router endpoints to preserve tool call schemas.
+- **Output Compression / Caveman Mode**: 9Router features output compression ("Caveman mode"), which converts tool call JSON into plain text summaries. `nscc` automatically passes `caveman: false` for both local (`localhost:20128` / `9router` preset) and cloud 9Router endpoints to preserve tool call schemas.
 - **Choosing a model**: prefer models explicitly documented as supporting OpenAI-style function calling / tool use. Run `nscc models` to see what your configured provider currently offers, and prefer full-size coding/agentic models over free or "flash" tiers when running multi-step tool loops — provider catalogs change often, so treat any specific model name as a starting point to test, not a guarantee.
 - If a model keeps replying in plain text instead of calling tools, `nscc` will automatically retry once with `tool_choice: "required"` before giving up and injecting a keepalive no-op so your session doesn't hang — check `nscc logs -f` for `[auto-retry]` / `[synthetic-continue]` lines to see this happening live.
 
