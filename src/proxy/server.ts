@@ -27,10 +27,12 @@ export class ProxyServer {
       res.json({ status: 'ok', proxy: 'nscc' });
     });
 
-    // Handle Anthropic Messages API
-    this.app.post(['/v1/messages', '/messages'], async (req: Request, res: Response) => {
+    // Handle Anthropic Messages API (supports optional /m/:sessionModel prefix for per-session model override)
+    this.app.post(['/v1/messages', '/messages', '/m/:sessionModel/v1/messages', '/m/:sessionModel/messages'], async (req: Request, res: Response) => {
       const startTime = Date.now();
       const config = ConfigManager.loadConfig();
+      const sessionModel = req.params.sessionModel ? decodeURIComponent(req.params.sessionModel) : undefined;
+      const activeFallbackModel = sessionModel || config.fallback.model;
       const isVerbose = config.proxy.verbose;
 
       const lastUserMsg = Array.isArray(req.body.messages)
@@ -235,16 +237,16 @@ export class ProxyServer {
       const providerName = config.fallback.provider.toUpperCase();
       const normalizedBaseUrl = normalizeOpenAIBaseUrl(config.fallback.baseUrl);
       if (isForceFallback) {
-        Logger.log(`🔀 [Force Fallback] Routing directly to ${providerName} (${normalizedBaseUrl}) with model: ${config.fallback.model}`);
+        Logger.log(`🔀 [Force Fallback] Routing directly to ${providerName} (${normalizedBaseUrl}) with model: ${activeFallbackModel}${sessionModel ? ' (session override)' : ''}`);
       } else {
-        Logger.log(`🔀 Switching seamlessly to ${providerName} fallback (${normalizedBaseUrl}) with model: ${config.fallback.model}`);
-        Logger.notify('nscc Failover', `Switched seamlessly to ${providerName} (${config.fallback.model})`);
+        Logger.log(`🔀 Switching seamlessly to ${providerName} fallback (${normalizedBaseUrl}) with model: ${activeFallbackModel}${sessionModel ? ' (session override)' : ''}`);
+        Logger.notify('nscc Failover', `Switched seamlessly to ${providerName} (${activeFallbackModel})`);
       }
 
       try {
         const openAIReq = translateAnthropicRequestToOpenAI(
           req.body,
-          config.fallback.model,
+          activeFallbackModel,
           config.fallback.maxTokens
         );
 

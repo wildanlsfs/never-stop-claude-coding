@@ -138,6 +138,21 @@ nscc -f
 
 Any arguments you'd normally pass to `claude` can be passed through `nscc` directly, e.g. `nscc --print "explain this repo"`.
 
+#### Per-Session / Per-Project Model Override:
+Need a different fallback model for each project or terminal session without changing your global config?
+```bash
+# Override for this session only:
+nscc -m "kr/claude-sonnet-4.5"
+nscc -f -m "deepseek/deepseek-chat"
+
+# Or via environment variable:
+NSCC_MODEL="combo" nscc -f
+
+# Or create a .nscc.json file in your project root:
+# { "model": "kr/claude-sonnet-4.5" }
+```
+Priority order: `-m / --model` flag > `NSCC_MODEL` env var > `.nscc.json` in current directory > global `~/.nscc/config.json`.
+
 ---
 
 ## 🔁 Multi-Account Rotation (Optional)
@@ -159,6 +174,7 @@ cux add   # run once per account, while logged into that account in Claude Code
 | :--- | :--- |
 | `nscc` | Launch Claude Code with silent background proxy (auto-switch on limit) |
 | `nscc -f` / `nscc --fallback` | Force route directly to the fallback provider immediately for this session |
+| `nscc -m <model>` / `nscc --model <model>` | Override the fallback model for this session only (or use `NSCC_MODEL` / `.nscc.json`) |
 | `nscc -c` / `nscc --auto-continue` | Auto re-inject "continue" when Claude Code (or the fallback model) stops mid-task |
 | `nscc config -f true` | Enable permanent direct fallback mode |
 | `nscc config -f false` | Disable permanent direct fallback mode (return to auto-switch on 429) |

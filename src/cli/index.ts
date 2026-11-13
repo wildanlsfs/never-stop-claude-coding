@@ -52,6 +52,25 @@ async function ensureProxyRunning(port: number): Promise<void> {
   }
 }
 
+function resolveSessionModel(cliModel?: string): string | undefined {
+  if (cliModel?.trim()) return cliModel.trim();
+  if (process.env.NSCC_MODEL?.trim()) return process.env.NSCC_MODEL.trim();
+
+  const localConfigPath = path.join(process.cwd(), '.nscc.json');
+  if (fs.existsSync(localConfigPath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(localConfigPath, 'utf-8'));
+      const localModel = parsed?.model || parsed?.fallback?.model;
+      if (typeof localModel === 'string' && localModel.trim()) {
+        return localModel.trim();
+      }
+    } catch {
+      // Ignore malformed project .nscc.json
+    }
+  }
+  return undefined;
+}
+
 // Default action / run command
 program
   .command('run', { isDefault: true })
@@ -60,8 +79,9 @@ program
   .option('-f, --fallback', 'Force using 9Router/fallback endpoint directly even if limit is not reached')
   .option('-v, --verbose', 'Show proxy status')
   .option('-c, --auto-continue', 'Automatically re-inject "continue" when Claude Code stops mid-task')
+  .option('-m, --model <model>', 'Override fallback model for this session only (does not modify global config)')
   .argument('[claudeArgs...]', 'Arguments passed directly to claude')
-  .action(async (claudeArgs: string[], options: { fallback?: boolean; verbose?: boolean; autoContinue?: boolean }) => {
+  .action(async (claudeArgs: string[], options: { fallback?: boolean; verbose?: boolean; autoContinue?: boolean; model?: string }) => {
     // Non-blocking update check
     UpdateNotifier.checkUpdate().catch(() => {});
 
@@ -82,11 +102,15 @@ program
     // visible to cux at all, so account rotation could never actually do anything
     // regardless of how many accounts were registered.
     const commandToRun = config.cux.enabled ? CuxManager.getCommand() : 'claude';
-    Logger.log(`nscc starting session on port ${proxyPort} (forceFallback: ${config.fallback.forceFallback}, launcher: ${commandToRun})`);
+    const sessionModel = resolveSessionModel(options.model);
+    const proxyBaseUrl = sessionModel
+      ? `http://localhost:${proxyPort}/m/${encodeURIComponent(sessionModel)}`
+      : `http://localhost:${proxyPort}`;
+    Logger.log(`nscc starting session on port ${proxyPort} (forceFallback: ${config.fallback.forceFallback}, launcher: ${commandToRun}, sessionModel: ${sessionModel ?? 'default'})`);
 
     const childEnv = {
       ...process.env,
-      ANTHROPIC_BASE_URL: `http://localhost:${proxyPort}`,
+      ANTHROPIC_BASE_URL: proxyBaseUrl,
     };
 
     if (!options.autoContinue) {

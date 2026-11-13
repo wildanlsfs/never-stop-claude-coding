@@ -147,6 +147,26 @@ describe('ProxyServer <-> 9Router integration', () => {
     expect(last9RouterReqBody.caveman).toBe(false);
   });
 
+  it('supports per-session model override via /m/:sessionModel/v1/messages without changing global config', async () => {
+    nextMockMode = 'non-stream';
+    const overrideModel = 'openai/gpt-4o-mini';
+
+    const res = await fetch(`http://127.0.0.1:${proxyPort}/m/${encodeURIComponent(overrideModel)}/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-3-5-sonnet-20241022',
+        max_tokens: 1024,
+        stream: false,
+        messages: [{ role: 'user', content: 'Say hello' }],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(last9RouterReqBody.model).toBe(overrideModel);
+    expect(ConfigManager.loadConfig().fallback.model).toBe('kr/claude-sonnet-4.5');
+  });
+
   it('omits tools field instead of sending empty array when all tools are filtered', () => {
     const req = translateAnthropicRequestToOpenAI(
       {
