@@ -363,6 +363,41 @@ describe('ProxyServer <-> 9Router integration', () => {
         content: '<system-reminder>Project context reminder</system-reminder>\nhi',
       },
     ]);
+
+    // 8. Native local command endpoint POST /s/:sessionId/nscc/command returns plain text for <local-command-stdout>
+    //    and switches the session model without touching /v1/messages
+    const localListRes = await fetch(`http://127.0.0.1:${proxyPort}/s/sessLocal/nscc/command`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'proxy-model', args: '' }),
+    });
+    expect(localListRes.status).toBe(200);
+    const localListJson: any = await localListRes.json();
+    expect(localListJson.text).toContain('nscc Proxy Models (9ROUTER)');
+    expect(localListJson.text).toContain('1. kr/claude-sonnet-4.5 (active)');
+    expect(localListJson.text).not.toContain('**');
+
+    const localSwitchRes = await fetch(`http://127.0.0.1:${proxyPort}/s/sessLocal/nscc/command`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'proxy-model', args: '3' }),
+    });
+    expect(localSwitchRes.status).toBe(200);
+    const localSwitchJson: any = await localSwitchRes.json();
+    expect(localSwitchJson.text).toContain("Switched this session's proxy fallback model to combo");
+
+    nextMockMode = 'non-stream';
+    await fetch(`http://127.0.0.1:${proxyPort}/s/sessLocal/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 256,
+        stream: false,
+        messages: [{ role: 'user', content: 'test after local command' }],
+      }),
+    });
+    expect(last9RouterReqBody.model).toBe('combo');
   });
 
   it('omits tools field instead of sending empty array when all tools are filtered', () => {

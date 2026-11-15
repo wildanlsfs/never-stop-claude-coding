@@ -177,6 +177,17 @@ describe('AccountManager & Mid-Session Auto-Switch', () => {
     const switchJson: any = await resSwitch.json();
     expect(switchJson.content[0].text).toContain('primary');
     expect(AccountManager.getActiveAccount()?.name).toBe('primary');
+
+    // Also verify native local command endpoint POST /s/:sessionId/nscc/command for proxy-account
+    const localSwitch = await fetch(`http://127.0.0.1:${proxyPort}/s/test1/nscc/command`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'proxy-account', args: '2' }),
+    });
+    expect(localSwitch.status).toBe(200);
+    const localSwitchJson: any = await localSwitch.json();
+    expect(localSwitchJson.text).toContain('Switched active Claude account to backup');
+    expect(AccountManager.getActiveAccount()?.name).toBe('backup');
   });
 
   it('routes directly to fallback when /f prefix is in session URL without mutating global config', async () => {

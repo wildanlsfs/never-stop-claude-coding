@@ -143,20 +143,15 @@ export class SlashCommandHandler {
     return cleaned.length > 0 ? cleaned : messages;
   }
 
-  public handleProxyAccount(req: Request, res: Response, arg: string): void {
-    const isStream = Boolean(req.body.stream);
-    const requestModel = req.body.model || 'claude-3-5-sonnet-20241022';
+  public executeProxyAccount(arg: string, plainText = false): string {
+    const format = (s: string) => (plainText ? this.stripMarkdown(s) : s);
     const store = AccountManager.loadStore();
 
     if (!arg) {
       if (store.accounts.length === 0) {
-        this.sendSyntheticAnthropicReply(
-          res,
-          requestModel,
-          `No Claude accounts registered in \`nscc\` yet.\n\nAdd accounts in another terminal (without exiting this session):\n\`nscc account add <name>\` (runs \`claude setup-token\`) or \`nscc account add <name> --token <token>\``,
-          isStream
+        return format(
+          `No Claude accounts registered in \`nscc\` yet.\n\nAdd accounts in another terminal (without exiting this session):\n\`nscc account add <name>\` (runs \`claude setup-token\`) or \`nscc account add <name> --token <token>\``
         );
-        return;
       }
 
       const now = Date.now();
@@ -168,26 +163,18 @@ export class SlashCommandHandler {
         return `${idx + 1}. \`${acc.name}\`${activeTag}${cooldownTag}`;
       });
 
-      this.sendSyntheticAnthropicReply(
-        res,
-        requestModel,
-        `**nscc Claude Accounts**\n\n${lines.join('\n')}\n\nSwitch account mid-session with:\n\`/proxy-account <number>\` or \`/proxy-account <name>\``,
-        isStream
+      return format(
+        `**nscc Claude Accounts**\n\n${lines.join('\n')}\n\nSwitch account mid-session with:\n\`/proxy-account <number>\` or \`/proxy-account <name>\``
       );
-      return;
     }
 
     let targetName = arg;
     if (/^\d+$/.test(arg)) {
       const idx = parseInt(arg, 10) - 1;
       if (idx < 0 || idx >= store.accounts.length) {
-        this.sendSyntheticAnthropicReply(
-          res,
-          requestModel,
-          `Invalid account number \`${arg}\`. Run \`/proxy-account\` to see valid numbers (1–${store.accounts.length}).`,
-          isStream
+        return format(
+          `Invalid account number \`${arg}\`. Run \`/proxy-account\` to see valid numbers (1–${store.accounts.length}).`
         );
-        return;
       }
       targetName = store.accounts[idx].name;
     }
@@ -195,15 +182,84 @@ export class SlashCommandHandler {
     try {
       const switched = AccountManager.useAccount(targetName);
       Logger.log(`🎯 [/proxy-account] Switched active Claude account to: ${switched.name}`);
-      this.sendSyntheticAnthropicReply(
-        res,
-        requestModel,
-        `Switched active Claude account to \`${switched.name}\` — next message will use it without exiting this session.`,
-        isStream
+      return format(
+        `Switched active Claude account to \`${switched.name}\` — next message will use it without exiting this session.`
       );
     } catch (err: any) {
-      this.sendSyntheticAnthropicReply(res, requestModel, `❌ ${err.message}`, isStream);
+      return format(`❌ ${err.message}`);
     }
+  }
+
+  public handleProxyAccount(req: Request, res: Response, arg: string): void {
+    const isStream = Boolean(req.body.stream);
+    const requestModel = req.body.model || 'claude-3-5-sonnet-20241022';
+    const text = this.executeProxyAccount(arg, false);
+    this.sendSyntheticAnthropicReply(res, requestModel, text, isStream);
+  }
+
+  public async executeProxyModel(
+    arg: string,
+    sessionId: string,
+    activeFallbackModel: string,
+    config: ReturnType<typeof ConfigManager.loadConfig>,
+    plainText = false
+  ): Promise<string> {
+    const format = (s: string) => (plainText ? this.stripMarkdown(s) : s);
+    const isLocalEndpoint = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(config.fallback.baseUrl.trim());
+    const effectiveApiKey = config.fallback.apiKey || (isLocalEndpoint ? '9router-local' : '');
+
+    if (!arg) {
+      try {
+        const models = await this.fetchProviderModels(config.fallback.baseUrl, effectiveApiKey);
+        this.lastFetchedModels.set(sessionId, models);
+
+        if (models.length === 0) {
+          return format(
+            `Active session model: \`${activeFallbackModel}\`\n\nNo models were returned by ${config.fallback.provider} (${normalizeOpenAIBaseUrl(config.fallback.baseUrl)}/models). You can still set one directly with:\n\`/proxy-model <model_id>\``
+          );
+        }
+
+        const formatted = models
+          .map((id, idx) => `${idx + 1}. \`${id}\`${id === activeFallbackModel ? ' *(active)*' : ''}`)
+          .join('\n');
+
+        return format(
+          `**nscc Proxy Models (${config.fallback.provider.toUpperCase()})**\nActive session model: \`${activeFallbackModel}\`\n\n${formatted}\n\nTo switch model for **this session only**, run:\n\`/proxy-model <number>\` or \`/proxy-model <model_id>\``
+        );
+      } catch (err: any) {
+        return format(
+          `Active session model: \`${activeFallbackModel}\`\n\nFailed to fetch models from ${normalizeOpenAIBaseUrl(config.fallback.baseUrl)}/models: ${err.message}\nYou can still switch directly with \`/proxy-model <model_id>\`.`
+        );
+      }
+    }
+
+    let chosenModel = arg;
+    if (/^\d+$/.test(arg)) {
+      let cached = this.lastFetchedModels.get(sessionId);
+      if (!cached || cached.length === 0) {
+        try {
+          cached = await this.fetchProviderModels(config.fallback.baseUrl, effectiveApiKey);
+          this.lastFetchedModels.set(sessionId, cached);
+        } catch (err: any) {
+          return format(
+            `Could not resolve model #${arg} because fetching /models failed: ${err.message}`
+          );
+        }
+      }
+      const index = parseInt(arg, 10) - 1;
+      if (index < 0 || index >= cached.length) {
+        return format(
+          `Invalid model number \`${arg}\`. Run \`/proxy-model\` to see valid numbers (1–${cached.length}).`
+        );
+      }
+      chosenModel = cached[index];
+    }
+
+    this.sessionModels.set(sessionId, chosenModel);
+    Logger.log(`🎯 [/proxy-model] Session ${sessionId} switched model to: ${chosenModel}`);
+    return format(
+      `Switched **this session's** proxy fallback model to \`${chosenModel}\` (other sessions and global config unchanged).`
+    );
   }
 
   public async handleProxyModel(
@@ -216,83 +272,15 @@ export class SlashCommandHandler {
   ): Promise<void> {
     const isStream = Boolean(req.body.stream);
     const requestModel = req.body.model || 'claude-3-5-sonnet-20241022';
-    const isLocalEndpoint = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(config.fallback.baseUrl.trim());
-    const effectiveApiKey = config.fallback.apiKey || (isLocalEndpoint ? '9router-local' : '');
+    const text = await this.executeProxyModel(arg, sessionId, activeFallbackModel, config, false);
+    this.sendSyntheticAnthropicReply(res, requestModel, text, isStream);
+  }
 
-    if (!arg) {
-      try {
-        const models = await this.fetchProviderModels(config.fallback.baseUrl, effectiveApiKey);
-        this.lastFetchedModels.set(sessionId, models);
-
-        if (models.length === 0) {
-          this.sendSyntheticAnthropicReply(
-            res,
-            requestModel,
-            `Active session model: \`${activeFallbackModel}\`\n\nNo models were returned by ${config.fallback.provider} (${normalizeOpenAIBaseUrl(config.fallback.baseUrl)}/models). You can still set one directly with:\n\`/proxy-model <model_id>\``,
-            isStream
-          );
-          return;
-        }
-
-        const formatted = models
-          .map((id, idx) => `${idx + 1}. \`${id}\`${id === activeFallbackModel ? ' *(active)*' : ''}`)
-          .join('\n');
-
-        this.sendSyntheticAnthropicReply(
-          res,
-          requestModel,
-          `**nscc Proxy Models (${config.fallback.provider.toUpperCase()})**\nActive session model: \`${activeFallbackModel}\`\n\n${formatted}\n\nTo switch model for **this session only**, run:\n\`/proxy-model <number>\` or \`/proxy-model <model_id>\``,
-          isStream
-        );
-      } catch (err: any) {
-        this.sendSyntheticAnthropicReply(
-          res,
-          requestModel,
-          `Active session model: \`${activeFallbackModel}\`\n\nFailed to fetch models from ${normalizeOpenAIBaseUrl(config.fallback.baseUrl)}/models: ${err.message}\nYou can still switch directly with \`/proxy-model <model_id>\`.`,
-          isStream
-        );
-      }
-      return;
-    }
-
-    let chosenModel = arg;
-    if (/^\d+$/.test(arg)) {
-      let cached = this.lastFetchedModels.get(sessionId);
-      if (!cached || cached.length === 0) {
-        try {
-          cached = await this.fetchProviderModels(config.fallback.baseUrl, effectiveApiKey);
-          this.lastFetchedModels.set(sessionId, cached);
-        } catch (err: any) {
-          this.sendSyntheticAnthropicReply(
-            res,
-            requestModel,
-            `Could not resolve model #${arg} because fetching /models failed: ${err.message}`,
-            isStream
-          );
-          return;
-        }
-      }
-      const index = parseInt(arg, 10) - 1;
-      if (index < 0 || index >= cached.length) {
-        this.sendSyntheticAnthropicReply(
-          res,
-          requestModel,
-          `Invalid model number \`${arg}\`. Run \`/proxy-model\` to see valid numbers (1–${cached.length}).`,
-          isStream
-        );
-        return;
-      }
-      chosenModel = cached[index];
-    }
-
-    this.sessionModels.set(sessionId, chosenModel);
-    Logger.log(`🎯 [/proxy-model] Session ${sessionId} switched model to: ${chosenModel}`);
-    this.sendSyntheticAnthropicReply(
-      res,
-      requestModel,
-      `Switched **this session's** proxy fallback model to \`${chosenModel}\` (other sessions and global config unchanged).`,
-      isStream
-    );
+  private stripMarkdown(text: string): string {
+    return text
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/\*([^*]+)\*/g, '$1')
+      .replace(/`([^`]+)`/g, '$1');
   }
 
   private async fetchProviderModels(baseUrl: string, apiKey: string): Promise<string[]> {

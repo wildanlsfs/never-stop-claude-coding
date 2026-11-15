@@ -69,42 +69,115 @@ async function ensureProxyRunning(port: number): Promise<void> {
   }
 }
 
-function ensureClaudeSlashCommands(): void {
+export function ensureClaudeSlashCommands(): void {
   try {
+    // 1. Remove legacy markdown prompt commands in ~/.claude/commands/ so they do not shadow
+    //    our native type:"local" plugin commands (Claude Code refuses $.command.register if a
+    //    user markdown command with the same name exists in ~/.claude/commands/).
     const commandsDir = path.join(os.homedir(), '.claude', 'commands');
-    const commands: Array<{ file: string; desc: string; cmd: string }> = [
+    for (const legacyFile of ['proxy-model.md', 'proxy-account.md']) {
+      const p = path.join(commandsDir, legacyFile);
+      if (fs.existsSync(p)) {
+        try {
+          fs.unlinkSync(p);
+        } catch {}
+      }
+    }
+
+    // 2. Install/update the native Claude Code plugin at ~/.claude/skills/nscc/
+    //    which registers /proxy-model and /proxy-account as true type:"local" commands
+    //    (rendered in <local-command-stdout> with shouldQuery:false, never entering chat context).
+    const skillPluginDir = path.join(os.homedir(), '.claude', 'skills', 'nscc');
+    const manifestDir = path.join(skillPluginDir, '.claude-plugin');
+    const hooksDir = path.join(skillPluginDir, 'hooks');
+
+    fs.mkdirSync(manifestDir, { recursive: true });
+    fs.mkdirSync(hooksDir, { recursive: true });
+
+    const filesToWrite: Array<{ filePath: string; content: string }> = [
       {
-        file: 'proxy-model.md',
-        desc: 'List or switch the active nscc proxy fallback model for this session',
-        cmd: '/proxy-model $ARGUMENTS',
+        filePath: path.join(manifestDir, 'plugin.json'),
+        content: JSON.stringify(
+          {
+            name: 'nscc',
+            version: '1.5.0',
+            description: 'Never Stop Claude Code local commands (/proxy-model, /proxy-account)',
+            author: { name: 'nscc' },
+            license: 'MIT',
+          },
+          null,
+          2
+        ) + '\n',
       },
       {
-        file: 'proxy-account.md',
-        desc: 'List or switch the active Claude account in nscc without exiting',
-        cmd: '/proxy-account $ARGUMENTS',
+        filePath: path.join(hooksDir, 'hooks.json'),
+        content: JSON.stringify({ modules: ['./register.js'] }, null, 2) + '\n',
+      },
+      {
+        filePath: path.join(hooksDir, 'register.js'),
+        content: [
+          'export function register(on) {',
+          '  on("session.start", async ($, e, next) => {',
+          '    await $.command.register({',
+          '      name: "proxy-model",',
+          '      description: "List or switch the active nscc proxy fallback model for this session",',
+          '      argumentHint: "[model_id_or_number]",',
+          '      immediate: true,',
+          '    });',
+          '    await $.command.register({',
+          '      name: "proxy-account",',
+          '      description: "List or switch the active Claude account in nscc without exiting",',
+          '      argumentHint: "[account_name_or_number]",',
+          '      immediate: true,',
+          '    });',
+          '    return next(e);',
+          '  });',
+          '',
+          '  on("command.run", { command: "proxy-model" }, async ($, e) => {',
+          '    try {',
+          '      const baseUrl = ((await $.env.get("ANTHROPIC_BASE_URL")) || "http://localhost:3456").replace(/\\/+$/, "");',
+          '      const res = await $.http.fetch(baseUrl + "/nscc/command", {',
+          '        method: "POST",',
+          '        headers: { "Content-Type": "application/json" },',
+          '        body: JSON.stringify({ command: "proxy-model", args: e.args }),',
+          '      });',
+          '      const data = JSON.parse(res.text);',
+          '      return { text: data.text || data.error || "No response from nscc proxy." };',
+          '    } catch (err) {',
+          '      return { text: "Failed to contact nscc proxy: " + (err && err.message ? err.message : String(err)) };',
+          '    }',
+          '  });',
+          '',
+          '  on("command.run", { command: "proxy-account" }, async ($, e) => {',
+          '    try {',
+          '      const baseUrl = ((await $.env.get("ANTHROPIC_BASE_URL")) || "http://localhost:3456").replace(/\\/+$/, "");',
+          '      const res = await $.http.fetch(baseUrl + "/nscc/command", {',
+          '        method: "POST",',
+          '        headers: { "Content-Type": "application/json" },',
+          '        body: JSON.stringify({ command: "proxy-account", args: e.args }),',
+          '      });',
+          '      const data = JSON.parse(res.text);',
+          '      return { text: data.text || data.error || "No response from nscc proxy." };',
+          '    } catch (err) {',
+          '      return { text: "Failed to contact nscc proxy: " + (err && err.message ? err.message : String(err)) };',
+          '    }',
+          '  });',
+          '}',
+          '',
+        ].join('\n'),
       },
     ];
 
-    fs.mkdirSync(commandsDir, { recursive: true });
-    for (const entry of commands) {
-      const commandFile = path.join(commandsDir, entry.file);
-      const expectedContent = [
-        '---',
-        `description: ${entry.desc}`,
-        'disable-model-invocation: true',
-        '---',
-        entry.cmd,
-        '',
-      ].join('\n');
-      if (fs.existsSync(commandFile)) {
+    for (const { filePath, content } of filesToWrite) {
+      if (fs.existsSync(filePath)) {
         try {
-          if (fs.readFileSync(commandFile, 'utf-8') === expectedContent) continue;
+          if (fs.readFileSync(filePath, 'utf-8') === content) continue;
         } catch {}
       }
-      fs.writeFileSync(commandFile, expectedContent, 'utf-8');
+      fs.writeFileSync(filePath, content, 'utf-8');
     }
   } catch {
-    // Non-fatal if ~/.claude/commands is not writable
+    // Non-fatal if ~/.claude is not writable
   }
 }
 

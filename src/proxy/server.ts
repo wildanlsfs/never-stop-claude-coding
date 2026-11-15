@@ -23,6 +23,7 @@ export class ProxyServer {
   private app = express();
   private server: http.Server | null = null;
   private sessionModels = new Map<string, string>();
+  private lastClientModels = new Map<string, string>();
   private slashCommands = new SlashCommandHandler(this.sessionModels);
 
   constructor() {
@@ -70,12 +71,39 @@ export class ProxyServer {
       res.json({ status: 'ok', proxy: 'nscc', buildMtime });
     });
 
+    // Local command execution endpoint for Claude Code native type:"local" plugin (/proxy-model, /proxy-account)
+    this.app.post('/nscc/command', async (req: SessionRequest, res: Response) => {
+      const config = ConfigManager.loadConfig();
+      const sessionId = req.nsccSessionId || req.body?.sessionId || 'default';
+      const initialSessionModel = req.nsccSessionModel || req.body?.sessionModel;
+      const activeFallbackModel = this.sessionModels.get(sessionId) || initialSessionModel || config.fallback.model;
+      const command = String(req.body?.command || '').trim();
+      const args = String(req.body?.args || '').trim();
+
+      if (command === 'proxy-model') {
+        const text = await this.slashCommands.executeProxyModel(args, sessionId, activeFallbackModel, config, true);
+        res.json({ text });
+        return;
+      }
+      if (command === 'proxy-account') {
+        const text = this.slashCommands.executeProxyAccount(args, true);
+        res.json({ text });
+        return;
+      }
+      res.status(400).json({ error: `Unknown nscc command: ${command}` });
+    });
+
     // Handle Anthropic Messages API
     this.app.post(['/v1/messages', '/messages'], async (req: SessionRequest, res: Response) => {
       const startTime = Date.now();
       const config = ConfigManager.loadConfig();
       const sessionId = req.nsccSessionId || 'default';
       const initialSessionModel = req.nsccSessionModel;
+      const clientModel = typeof req.body?.model === 'string' ? req.body.model.trim() : '';
+      if (clientModel && !/^claude-/i.test(clientModel) && this.lastClientModels.get(sessionId) !== clientModel) {
+        this.lastClientModels.set(sessionId, clientModel);
+        this.sessionModels.set(sessionId, clientModel);
+      }
       const activeFallbackModel = this.sessionModels.get(sessionId) || initialSessionModel || config.fallback.model;
       const isVerbose = config.proxy.verbose;
 
