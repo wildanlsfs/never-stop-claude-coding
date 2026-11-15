@@ -12,11 +12,13 @@
 ## ✨ Features & Terminal UX Best Practices
 
 - 🎯 **Direct Fallback Flag (`nscc -f`)**: Force 9Router / OpenRouter / DeepSeek routing **immediately**, even if your Claude rate limit has not been reached yet!
-- 🔄 **Seamless Mid-Session Account Auto-Switch**: Register multiple Claude tokens (`nscc account add <name>`) and `nscc` automatically rotates on `429` rate limits **without exiting your session**, falling back to 9Router/OpenRouter only if all accounts are rate-limited.
+- 🔄 **Seamless Mid-Session Account Auto-Switch**: Register multiple Claude tokens (`nscc account add <name>`) and `nscc` automatically rotates on `429` / `529` / `401` / `403` **without exiting your session**, falling back to 9Router/OpenRouter only if all accounts are on cooldown.
+- ⚡ **Native Local Slash Commands (`/proxy-model`, `/proxy-account`)**: Auto-installs a native Claude Code plugin (`~/.claude/skills/nscc/`) so `/proxy-model` and `/proxy-account` run as true local commands (`<local-command-stdout>`) — zero LLM calls and **zero chat context pollution**.
+- 🧠 **Native Collapsible `thinking` Blocks**: Streams reasoning tokens (`reasoning_content` / `thinking`) from fallback providers as native Claude Code `thinking` blocks (`thinking_delta`) and strips historical thinking blocks on subsequent turns to keep context clean.
 - 🔇 **100% Clean Terminal Output**: Runs proxy requests silently in the background so Claude Code's interactive TUI screen is **never corrupted** by log text or flickering.
-- 🔔 **Native macOS Notifications**: Receive toast banners when `nscc` hot-swaps to 9Router/OpenRouter (macOS only — see [Platform Support](#-platform-support)).
+- 🔔 **Native macOS Notifications**: Receive toast banners when `nscc` hot-swaps accounts or fails over to 9Router/OpenRouter (macOS only — see [Platform Support](#-platform-support)).
 - 📜 **Live Proxy Logging (`nscc logs`)**: Log traffic to `~/.nscc/proxy.log`. Tail live logs in a separate split terminal using `nscc logs -f`.
-- 🔀 **Transparent API Proxy**: Translates Anthropic's `/v1/messages` format (including system prompts, tool execution turns `tool_use`/`tool_result`, and streaming SSE events) into OpenAI `/v1/chat/completions` format, and back.
+- 🔀 **Transparent API Proxy**: Translates Anthropic's `/v1/messages` format (including system prompts, parallel tool execution turns `tool_use`/`tool_result`, thinking blocks, and streaming SSE events) into OpenAI `/v1/chat/completions` format, and back.
 - 🌐 **First-Class 9Router Support**: Native presets for **9Router** (local `http://localhost:20128/v1` or cloud instance), **OpenRouter**, **DeepSeek**, and custom OpenAI-compatible endpoints.
 - 🛡️ **Zero Context Loss**: Intercepts rate limits at the local proxy level before Claude Code sees the error, preserving your full prompt history and conversation state.
 
@@ -150,9 +152,43 @@ NSCC_MODEL="combo" nscc -f
 ```
 Priority order: `/proxy-model` in-chat override > `-m / --model` flag > `NSCC_MODEL` env var > `.nscc.json` in current directory > global `~/.nscc/config.json`.
 
-You can also switch models **mid-chat** inside Claude Code (for the current session only) using:
+You can also switch models **mid-chat** inside Claude Code (for the current session only) using native local slash commands:
 - `/proxy-model` — list available models from your configured provider (e.g. 9Router)
 - `/proxy-model <number>` or `/proxy-model <model_id>` — switch the active session's model immediately
+
+---
+
+### 4. Multi-Account Auto-Rotation (`nscc account`)
+
+If you have multiple Claude Pro/Max accounts or API keys, you can register them in `nscc`'s account pool. When the active account hits a rate limit (`429` / `529`) or auth error (`401` / `403`), `nscc` automatically marks it on cooldown (`Retry-After`) and retries the exact same request with your next available Claude account **mid-session without exiting Claude Code**. Only when all registered Claude accounts are on cooldown does `nscc` fail over to your configured fallback provider (9Router / OpenRouter / DeepSeek).
+
+```bash
+# Add a Claude account (launches `claude setup-token` interactively, or pass --token directly):
+nscc account add work
+nscc account add personal --token "sk-ant-oat01-..."
+
+# Check account pool and cooldown status:
+nscc account list
+
+# Manually switch the active account from terminal:
+nscc account use personal
+
+# Remove an account:
+nscc account remove work
+```
+
+Inside a running Claude Code session, you can also inspect or switch accounts at any time without leaving the TUI:
+- `/proxy-account` — list registered Claude accounts, active indicator, and remaining cooldown timers
+- `/proxy-account <number>` or `/proxy-account <name>` — switch the active Claude account immediately
+
+---
+
+### 5. Native Local Slash Commands & Collapsible Thinking
+
+`nscc` automatically installs a lightweight native Claude Code plugin at `~/.claude/skills/nscc/` (`nscc@skills-dir`).
+- **`/proxy-model` and `/proxy-account` run locally (`type: "local"`)**: Output is rendered directly in `<local-command-stdout>` (just like built-in `/status` or `/cost`). They never call `/v1/messages` and **never enter your conversation history or LLM token context**.
+- **Native `thinking` blocks**: Reasoning output (`reasoning_content` / `thinking`) from fallback providers is translated into native Anthropic `thinking` blocks (`thinking_delta`), and historical thinking blocks are automatically stripped from subsequent turns so they do not bloat your context window.
+- **Upgrading while a session is open**: If you update `nscc` while a Claude Code session is already running, type `/reload-plugins` once inside Claude Code to activate the updated local commands.
 
 ---
 
@@ -172,19 +208,20 @@ You can also switch models **mid-chat** inside Claude Code (for the current sess
 | `nscc config -m <model>` | Set target fallback model |
 | `nscc config --port <port>` | Set the local proxy port (default `3456`) |
 | `nscc config -v true` \| `false` | Persist verbose proxy logging on/off |
-| `nscc status` | Display status of proxy port and active fallback configuration |
+| `nscc status` | Display status of proxy port, account pool, and active fallback configuration |
 | `nscc models` | Fetch & list all available models from the configured fallback provider |
 | `nscc models --set <model_id>` | Set and save the active fallback model |
 | `nscc account add <name>` | Add a Claude account token (via `claude setup-token` or `--token`) for mid-session auto-switch |
 | `nscc account list` | List registered Claude accounts and cooldown status |
 | `nscc account use <name>` | Manually switch the active Claude account |
 | `nscc account remove <name>` | Remove a Claude account from the pool |
-| `/proxy-account` | In-chat command to list or switch Claude accounts without exiting the session |
+| `/proxy-model [num\|id]` | Native local in-chat command to list or switch the session's fallback model (zero context pollution) |
+| `/proxy-account [num\|name]` | Native local in-chat command to list or switch Claude accounts mid-session (zero context pollution) |
 | `nscc logs` | Print the proxy log file (`~/.nscc/proxy.log`) |
 | `nscc logs -f` | Tail live proxy logs in real-time |
 | `nscc proxy --port <port>` | Run the proxy server standalone in the foreground (mainly for debugging) |
 
-All configuration is stored in `~/.nscc/config.json`. See [Security Note](#-security-note) below before sharing that file or your dotfiles.
+All configuration is stored in `~/.nscc/config.json` and account tokens in `~/.nscc/accounts.json` (`0600` permissions). See [Security Note](#-security-note) below before sharing those files or your dotfiles.
 
 ---
 
@@ -213,11 +250,11 @@ If a fallback model halts mid-task by returning a text summary instead of a tool
 
 ## 🔒 Security Note
 
-`nscc` stores your fallback provider API key **in plaintext** at `~/.nscc/config.json`. Treat this file like a credentials file:
+`nscc` stores your fallback provider API key at `~/.nscc/config.json` and registered Claude account tokens at `~/.nscc/accounts.json` (written with `0600` owner-only permissions). Treat both files as credential files:
 
-- Don't commit it, share it, or paste its contents when asking for help.
-- `nscc status` masks your key (showing only the last 4 characters) — prefer that over `cat`-ing the config file when troubleshooting in public.
-- If a key ever leaks, rotate it with your provider immediately and re-run `nscc config -k <new-key>`.
+- Don't commit them, share them, or paste their contents when asking for help.
+- `nscc status` and `nscc account list` mask your keys/tokens — prefer those commands over `cat`-ing the JSON files when troubleshooting in public.
+- If a key or token ever leaks, revoke/rotate it immediately and update via `nscc config -k <new-key>` or `nscc account add <name> --token <new-token>`.
 
 ---
 
