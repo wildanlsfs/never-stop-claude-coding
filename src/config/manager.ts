@@ -36,7 +36,6 @@ export const PROVIDER_PRESETS: Record<string, Partial<NsccConfig['fallback']>> =
 };
 
 export type ConfigUpdate = {
-  cux?: Partial<NsccConfig['cux']>;
   fallback?: Partial<NsccConfig['fallback']>;
   proxy?: Partial<NsccConfig['proxy']>;
 };
@@ -84,7 +83,6 @@ export class ConfigManager {
     const merged = ConfigSchema.parse({
       ...currentConfig,
       ...config,
-      cux: { ...currentConfig.cux, ...(config.cux || {}) },
       fallback: mergedFallback,
       proxy: { ...currentConfig.proxy, ...(config.proxy || {}) },
     });

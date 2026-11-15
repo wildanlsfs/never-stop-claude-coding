@@ -5,9 +5,10 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import readline from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
+import { AccountManager } from '../accounts/manager.js';
 import { ConfigManager, PROVIDER_PRESETS, normalizeOpenAIBaseUrl } from '../config/manager.js';
-import { CuxManager } from '../cux/manager.js';
 import { ProxyServer } from '../proxy/server.js';
 import { Logger } from '../utils/logger.js';
 import { UpdateNotifier } from '../utils/update.js';
@@ -20,7 +21,7 @@ const program = new Command();
 
 program
   .name('nscc')
-  .description('Never Stop Claude Code - Multi-account rotation & OpenAI/9Router fallback CLI')
+  .description('Never Stop Claude Code - Auto-fallback proxy CLI for 9Router/OpenRouter/DeepSeek')
   .version('1.5.0');
 
 function getExpectedProxyBuildMtime(): number {
@@ -68,23 +69,32 @@ async function ensureProxyRunning(port: number): Promise<void> {
   }
 }
 
-function ensureProxyModelSlashCommand(): void {
+function ensureClaudeSlashCommands(): void {
   try {
     const commandsDir = path.join(os.homedir(), '.claude', 'commands');
-    const commandFile = path.join(commandsDir, 'proxy-model.md');
-    if (fs.existsSync(commandFile)) return;
-    fs.mkdirSync(commandsDir, { recursive: true });
-    fs.writeFileSync(
-      commandFile,
-      [
-        '---',
-        'description: List or switch the active nscc proxy fallback model for this session',
-        '---',
-        '/proxy-model $ARGUMENTS',
-        '',
-      ].join('\n'),
-      'utf-8'
-    );
+    const commands: Array<{ file: string; desc: string; cmd: string }> = [
+      {
+        file: 'proxy-model.md',
+        desc: 'List or switch the active nscc proxy fallback model for this session',
+        cmd: '/proxy-model $ARGUMENTS',
+      },
+      {
+        file: 'proxy-account.md',
+        desc: 'List or switch the active Claude account in nscc without exiting',
+        cmd: '/proxy-account $ARGUMENTS',
+      },
+    ];
+
+    for (const entry of commands) {
+      const commandFile = path.join(commandsDir, entry.file);
+      if (fs.existsSync(commandFile)) continue;
+      fs.mkdirSync(commandsDir, { recursive: true });
+      fs.writeFileSync(
+        commandFile,
+        ['---', `description: ${entry.desc}`, '---', entry.cmd, ''].join('\n'),
+        'utf-8'
+      );
+    }
   } catch {
     // Non-fatal if ~/.claude/commands is not writable
   }
@@ -123,30 +133,21 @@ program
     // Non-blocking update check
     UpdateNotifier.checkUpdate().catch(() => {});
 
-    // If -f / --fallback is passed, set forceFallback temporarily in config
-    if (options.fallback) {
-      ConfigManager.saveConfig({ fallback: { forceFallback: true } });
-    }
-
     const config = ConfigManager.loadConfig();
     const proxyPort = config.proxy.port;
 
     // Ensure background proxy is running silently
     await ensureProxyRunning(proxyPort);
 
-    // Launch through cux's wrapper (not plain `claude`) whenever cux integration is
-    // enabled and installed — `cux switch`/`cux force-switch` can only rotate an
-    // *active cux-wrapped session*; a directly-spawned `claude` process was never
-    // visible to cux at all, so account rotation could never actually do anything
-    // regardless of how many accounts were registered.
-    const commandToRun = config.cux.enabled ? CuxManager.getCommand() : 'claude';
+    const commandToRun = 'claude';
     const sessionId = randomUUID().slice(0, 8);
     const sessionModel = resolveSessionModel(options.model);
-    const proxyBaseUrl = sessionModel
-      ? `http://localhost:${proxyPort}/s/${sessionId}/m/${encodeURIComponent(sessionModel)}`
-      : `http://localhost:${proxyPort}/s/${sessionId}`;
-    ensureProxyModelSlashCommand();
-    Logger.log(`nscc starting session ${sessionId} on port ${proxyPort} (forceFallback: ${config.fallback.forceFallback}, launcher: ${commandToRun}, sessionModel: ${sessionModel ?? 'default'})`);
+    const isSessionForceFallback = Boolean(options.fallback || config.fallback.forceFallback);
+    const forcePrefix = options.fallback ? '/f' : '';
+    const modelPrefix = sessionModel ? `/m/${encodeURIComponent(sessionModel)}` : '';
+    const proxyBaseUrl = `http://localhost:${proxyPort}/s/${sessionId}${forcePrefix}${modelPrefix}`;
+    ensureClaudeSlashCommands();
+    Logger.log(`nscc starting session ${sessionId} on port ${proxyPort} (forceFallback: ${isSessionForceFallback}, launcher: ${commandToRun}, sessionModel: ${sessionModel ?? 'default'})`);
 
     const childEnv = {
       ...process.env,
@@ -211,20 +212,19 @@ program
 // Status command
 program
   .command('status')
-  .description('Check nscc status, cux installation, and fallback endpoint configuration')
+  .description('Check nscc status and fallback endpoint configuration')
   .action(async () => {
     await UpdateNotifier.checkUpdate().catch(() => {});
 
     const config = ConfigManager.loadConfig();
-    const cuxInstalled = CuxManager.isInstalled();
     const proxyRunning = await isProxyHealthy(config.proxy.port);
 
     console.log('\n📊 Never Stop Claude Code (nscc) Status');
     console.log('====================================');
     console.log(`Version:              v${UpdateNotifier.getLocalVersion()}`);
     console.log(`Proxy Server Running: ${proxyRunning ? '✅ Active (Port ' + config.proxy.port + ')' : '⏹️ Stopped (Auto-starts on nscc)'}`);
-    console.log(`cux Tool Installed:   ${cuxInstalled ? '✅ Yes' : '❌ No (Install with: npm i -g @inulute/cux)'}`);
-    console.log(`cux Auto-Rotate:     ${config.cux.autoRotateOnRateLimit ? '✅ Enabled' : '❌ Disabled'}`);
+    const accountStore = AccountManager.loadStore();
+    console.log(`Claude Account Pool:  ${accountStore.accounts.length > 0 ? `✅ ${accountStore.accounts.length} account(s) (active: ${accountStore.activeAccount ?? 'none'})` : 'ℹ️ None (using default Claude CLI login)'}`);
     console.log(`Force Fallback Mode:  ${config.fallback.forceFallback ? '🚨 Enabled (Direct Fallback)' : '⚡ Disabled (Auto on 429)'}`);
     console.log(`Fallback Provider:    ${config.fallback.provider.toUpperCase()}`);
     console.log(`Fallback Enabled:     ${config.fallback.enabled ? '✅ Yes' : '❌ No'}`);
@@ -361,6 +361,86 @@ program
     }
   });
 
+
+// Account pool management command
+const accountCmd = program
+  .command('account')
+  .description('Manage Claude account tokens for seamless mid-session auto-switching');
+
+accountCmd
+  .command('add <name>')
+  .description('Add or update a Claude account token (via --token or interactive claude setup-token)')
+  .option('-t, --token <token>', 'OAuth token (from `claude setup-token`) or Anthropic API key')
+  .action(async (name: string, options: { token?: string }) => {
+    let token = options.token?.trim() || '';
+    if (!token) {
+      console.log(`\n🔑 Generating long-lived token for "${name}" via \`claude setup-token\`...`);
+      console.log('   Complete the browser login if prompted, then paste the generated token below.\n');
+      spawnSync('claude', ['setup-token'], { stdio: 'inherit' });
+
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      try {
+        token = (await rl.question(`Paste token for "${name}": `)).trim();
+      } finally {
+        rl.close();
+      }
+    }
+
+    if (!token) {
+      console.error('❌ No token provided. Aborted.');
+      process.exitCode = 1;
+      return;
+    }
+
+    const store = AccountManager.addAccount(name, token);
+    console.log(`✅ Saved Claude account "${name}" (total: ${store.accounts.length}, active: ${store.activeAccount}).`);
+    console.log(`   Stored securely (0600) at ${AccountManager.getStorePath()}`);
+  });
+
+accountCmd
+  .command('list')
+  .description('List registered Claude accounts in the auto-switch pool')
+  .action(() => {
+    const store = AccountManager.loadStore();
+    if (store.accounts.length === 0) {
+      console.log('\nℹ️ No Claude accounts registered yet.');
+      console.log('   Add one with: nscc account add <name>\n');
+      return;
+    }
+
+    const now = Date.now();
+    console.log(`\n👤 Claude Account Pool (${store.accounts.length} total):\n`);
+    for (const acc of store.accounts) {
+      const masked = acc.token.length > 8 ? `...${acc.token.slice(-6)}` : '******';
+      const active = acc.name === store.activeAccount ? ' 👈 [ACTIVE]' : '';
+      const cooldown = acc.cooldownUntil && acc.cooldownUntil > now
+        ? ` (cooldown ${Math.ceil((acc.cooldownUntil - now) / 1000)}s)`
+        : '';
+      console.log(`  • ${acc.name} (${masked})${active}${cooldown}`);
+    }
+    console.log('');
+  });
+
+accountCmd
+  .command('use <name>')
+  .description('Manually switch the active Claude account')
+  .action((name: string) => {
+    try {
+      const acc = AccountManager.useAccount(name);
+      console.log(`✅ Switched active Claude account to "${acc.name}".`);
+    } catch (err: any) {
+      console.error(`❌ ${err.message}`);
+      process.exitCode = 1;
+    }
+  });
+
+accountCmd
+  .command('remove <name>')
+  .description('Remove a Claude account from the pool')
+  .action((name: string) => {
+    const store = AccountManager.removeAccount(name);
+    console.log(`✅ Removed "${name}" (remaining: ${store.accounts.length}, active: ${store.activeAccount ?? 'none'}).`);
+  });
 
 // Proxy command (Standalone proxy server)
 program

@@ -16,7 +16,7 @@ describe('ProxyServer <-> 9Router integration', () => {
   let proxyPort: number;
   let last9RouterReqBody: any = null;
   let last9RouterAuthHeader: string | undefined;
-  let nextMockMode: 'stream-parallel-tools' | 'non-stream' = 'stream-parallel-tools';
+  let nextMockMode: 'stream-parallel-tools' | 'non-stream' | 'non-stream-sse' = 'stream-parallel-tools';
 
   beforeAll(async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nscc-proxy-test-'));
@@ -53,6 +53,16 @@ describe('ProxyServer <-> 9Router integration', () => {
               }],
               usage: { prompt_tokens: 10, completion_tokens: 5 },
             }));
+            return;
+          }
+
+          if (nextMockMode === 'non-stream-sse') {
+            res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+            res.write(`data: ${JSON.stringify({ id: 'chatcmpl-sse', choices: [{ delta: { role: 'assistant', content: '' } }] })}\n\n`);
+            res.write(`data:${JSON.stringify({ id: 'chatcmpl-sse', choices: [{ delta: { content: 'Reassembled ' } }] })}\n\n`);
+            res.write(`data: ${JSON.stringify({ id: 'chatcmpl-sse', choices: [{ delta: { content: 'SSE text!' }, finish_reason: 'stop' }] })}\n\n`);
+            res.write('data: [DONE]\n\n');
+            res.end();
             return;
           }
 
@@ -157,6 +167,22 @@ describe('ProxyServer <-> 9Router integration', () => {
     expect(json.type).toBe('message');
     expect(json.content[0].text).toBe('Hello from 9Router!');
     expect(last9RouterReqBody.caveman).toBe(false);
+
+    // Also verify multi-chunk SSE returned for a non-streaming request is reassembled completely
+    nextMockMode = 'non-stream-sse';
+    const sseFallbackRes = await fetch(`http://127.0.0.1:${proxyPort}/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-3-5-sonnet-20241022',
+        max_tokens: 1024,
+        stream: false,
+        messages: [{ role: 'user', content: 'Say hello' }],
+      }),
+    });
+    expect(sseFallbackRes.status).toBe(200);
+    const sseFallbackJson: any = await sseFallbackRes.json();
+    expect(sseFallbackJson.content[0].text).toBe('Reassembled SSE text!');
   });
 
   it('supports per-session model override via /m/:sessionModel/v1/messages without changing global config', async () => {
@@ -260,6 +286,25 @@ describe('ProxyServer <-> 9Router integration', () => {
     expect(xmlRes.status).toBe(200);
     const xmlJson: any = await xmlRes.json();
     expect(xmlJson.content[0].text).toContain('combo');
+
+    // 6. Auto-mode classifier <transcript> mentioning /proxy-model must NOT be intercepted
+    nextMockMode = 'non-stream';
+    const transcriptRes = await fetch(`http://127.0.0.1:${proxyPort}/s/sessC/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-5',
+        max_tokens: 256,
+        stream: false,
+        messages: [{
+          role: 'user',
+          content: '<transcript>\n{"user":"/proxy-model 1"}\n</transcript>',
+        }],
+      }),
+    });
+    expect(transcriptRes.status).toBe(200);
+    const transcriptJson: any = await transcriptRes.json();
+    expect(transcriptJson.content[0].text).toBe('Hello from 9Router!');
   });
 
   it('omits tools field instead of sending empty array when all tools are filtered', () => {

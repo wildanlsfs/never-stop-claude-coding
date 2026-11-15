@@ -1,13 +1,6 @@
 import { z } from 'zod';
 
 export const ConfigSchema = z.object({
-  cux: z.object({
-    enabled: z.boolean().default(true),
-    autoRotateOnRateLimit: z.boolean().default(true),
-  }).default({
-    enabled: true,
-    autoRotateOnRateLimit: true,
-  }),
   fallback: z.object({
     enabled: z.boolean().default(true),
     forceFallback: z.boolean().default(false), // If true, route directly to fallback even if limit is not reached

@@ -1,6 +1,6 @@
 # Never Stop Claude Code (`nscc`) 🚀
 
-> Never let a 5-hour rate limit break your coding flow. Auto-rotate Claude accounts via `cux` and fall back to 9Router, OpenRouter, or DeepSeek seamlessly without losing session context.
+> Never let a 5-hour rate limit break your coding flow. Fall back to 9Router, OpenRouter, or DeepSeek seamlessly without losing session context.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-green.svg)](https://nodejs.org/)
@@ -12,10 +12,10 @@
 ## ✨ Features & Terminal UX Best Practices
 
 - 🎯 **Direct Fallback Flag (`nscc -f`)**: Force 9Router / OpenRouter / DeepSeek routing **immediately**, even if your Claude rate limit has not been reached yet!
+- 🔄 **Seamless Mid-Session Account Auto-Switch**: Register multiple Claude tokens (`nscc account add <name>`) and `nscc` automatically rotates on `429` rate limits **without exiting your session**, falling back to 9Router/OpenRouter only if all accounts are rate-limited.
 - 🔇 **100% Clean Terminal Output**: Runs proxy requests silently in the background so Claude Code's interactive TUI screen is **never corrupted** by log text or flickering.
-- 🔔 **Native macOS Notifications**: Receive toast banners when `nscc` auto-rotates accounts via `cux` or hot-swaps to 9Router/OpenRouter (macOS only — see [Platform Support](#-platform-support)).
+- 🔔 **Native macOS Notifications**: Receive toast banners when `nscc` hot-swaps to 9Router/OpenRouter (macOS only — see [Platform Support](#-platform-support)).
 - 📜 **Live Proxy Logging (`nscc logs`)**: Log traffic to `~/.nscc/proxy.log`. Tail live logs in a separate split terminal using `nscc logs -f`.
-- 🔄 **Multi-Account Auto-Rotation (`cux`)**: Integrates with [`inulute/cux`](https://github.com/inulute/cux) to rotate Claude Pro/Max accounts automatically on 429 rate limits.
 - 🔀 **Transparent API Proxy**: Translates Anthropic's `/v1/messages` format (including system prompts, tool execution turns `tool_use`/`tool_result`, and streaming SSE events) into OpenAI `/v1/chat/completions` format, and back.
 - 🌐 **First-Class 9Router Support**: Native presets for **9Router** (local `http://localhost:20128/v1` or cloud instance), **OpenRouter**, **DeepSeek**, and custom OpenAI-compatible endpoints.
 - 🛡️ **Zero Context Loss**: Intercepts rate limits at the local proxy level before Claude Code sees the error, preserving your full prompt history and conversation state.
@@ -35,16 +35,14 @@
                        ┌──────────────────────▼───────────────────────┐
                        │          nscc Local Proxy Server             │
                        │               (Port 3456)                    │
-                       └──────┬──────────────────────┬─────────▲──────┘
-                              │                      │         │ 429 Rate Limit
-                     Tier 1   │             Tier 2   │         │ (Intercepted)
-                              ▼                      ▼         │
-                      ┌──────────────┐       ┌─────────────────┴──────────┐
-                      │  cux Engine  │       │  Anthropic <-> OpenAI      │
-                      │ (Claude OAuth│       │  Protocol Translator       │
-                      │ Accounts)    │       │ (9Router / OpenRouter /    │
-                      └──────────────┘       │  DeepSeek / Custom API)    │
-                                             └────────────────────────────┘
+                       └──────┬──────────────────────────────▲────────┘
+                              │                              │ 429 Rate Limit
+                     Fallback │                              │ (Intercepted)
+                              ▼                              │
+                       ┌─────────────────────────────────────┴────────┐
+                       │  Anthropic <-> OpenAI Protocol Translator    │
+                       │  (9Router / OpenRouter / DeepSeek / Custom)  │
+                       └──────────────────────────────────────────────┘
 ```
 
 `nscc` never talks to Anthropic on your behalf with new credentials — it launches the `claude` CLI you already have installed and authenticated, and simply points its `ANTHROPIC_BASE_URL` at a local proxy. That proxy tries your real Anthropic account first, and only reaches out to a fallback provider (9Router / OpenRouter / DeepSeek / any OpenAI-compatible endpoint) when your account is rate-limited or you explicitly force it to.
@@ -62,7 +60,6 @@ Before installing `nscc`, make sure you have:
    claude login
    ```
 3. **(Optional) A fallback provider account** if you want automatic failover when you hit a rate limit — an API key from [9Router](https://9router.com), [OpenRouter](https://openrouter.ai), [DeepSeek](https://platform.deepseek.com), or any other OpenAI-compatible endpoint.
-4. **(Optional) [`cux`](https://github.com/inulute/cux)** if you want to rotate between multiple Claude Pro/Max accounts automatically on 429s (see [Multi-Account Rotation](#multi-account-rotation-optional) below).
 
 ---
 
@@ -159,19 +156,6 @@ You can also switch models **mid-chat** inside Claude Code (for the current sess
 
 ---
 
-## 🔁 Multi-Account Rotation (Optional)
-
-If you have multiple Claude Pro/Max accounts and want `nscc` to auto-rotate between them on a 429 before ever falling back to another provider:
-
-```bash
-npm install -g @inulute/cux
-cux add   # run once per account, while logged into that account in Claude Code
-```
-
-`nscc` detects `cux` automatically and will rotate accounts first, only reaching for your configured fallback provider if every account in the pool is also rate-limited.
-
----
-
 ## ⚙️ Configuration Commands
 
 | Command | Description |
@@ -188,9 +172,14 @@ cux add   # run once per account, while logged into that account in Claude Code
 | `nscc config -m <model>` | Set target fallback model |
 | `nscc config --port <port>` | Set the local proxy port (default `3456`) |
 | `nscc config -v true` \| `false` | Persist verbose proxy logging on/off |
-| `nscc status` | Display status of `cux`, proxy port, and active fallback configuration |
+| `nscc status` | Display status of proxy port and active fallback configuration |
 | `nscc models` | Fetch & list all available models from the configured fallback provider |
 | `nscc models --set <model_id>` | Set and save the active fallback model |
+| `nscc account add <name>` | Add a Claude account token (via `claude setup-token` or `--token`) for mid-session auto-switch |
+| `nscc account list` | List registered Claude accounts and cooldown status |
+| `nscc account use <name>` | Manually switch the active Claude account |
+| `nscc account remove <name>` | Remove a Claude account from the pool |
+| `/proxy-account` | In-chat command to list or switch Claude accounts without exiting the session |
 | `nscc logs` | Print the proxy log file (`~/.nscc/proxy.log`) |
 | `nscc logs -f` | Tail live proxy logs in real-time |
 | `nscc proxy --port <port>` | Run the proxy server standalone in the foreground (mainly for debugging) |
@@ -216,16 +205,15 @@ If a fallback model halts mid-task by returning a text summary instead of a tool
 
 ## 🖥️ Platform Support
 
-`nscc` itself is a Node.js CLI and runs anywhere Node 18+ and the `claude` CLI run (macOS, Linux, Windows). Two features are currently more limited:
+`nscc` itself is a Node.js CLI and runs anywhere Node 18+ and the `claude` CLI run (macOS, Linux, Windows).
 
 - **Desktop notifications** (`Logger.notify`) use `osascript` and only fire on **macOS**. On other platforms `nscc` still works — you just won't get the toast banners; use `nscc logs -f` to watch events instead.
-- **`cux` account rotation** relies on the `which` command to detect installation. This works out of the box on macOS/Linux; on native Windows, run `nscc` under WSL or Git Bash for `cux` rotation to be detected.
 
 ---
 
 ## 🔒 Security Note
 
-`nscc` stores your fallback provider API key **in plaintext** at `~/.nscc/config.json` (and, separately, `cux` manages your Claude OAuth sessions). Treat this file like a credentials file:
+`nscc` stores your fallback provider API key **in plaintext** at `~/.nscc/config.json`. Treat this file like a credentials file:
 
 - Don't commit it, share it, or paste its contents when asking for help.
 - `nscc status` masks your key (showing only the last 4 characters) — prefer that over `cat`-ing the config file when troubleshooting in public.
