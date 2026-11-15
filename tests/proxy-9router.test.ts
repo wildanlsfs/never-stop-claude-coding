@@ -16,7 +16,7 @@ describe('ProxyServer <-> 9Router integration', () => {
   let proxyPort: number;
   let last9RouterReqBody: any = null;
   let last9RouterAuthHeader: string | undefined;
-  let nextMockMode: 'stream-parallel-tools' | 'non-stream' | 'non-stream-sse' = 'stream-parallel-tools';
+  let nextMockMode: 'stream-parallel-tools' | 'stream-thinking' | 'non-stream' | 'non-stream-sse' = 'stream-parallel-tools';
 
   beforeAll(async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nscc-proxy-test-'));
@@ -61,6 +61,15 @@ describe('ProxyServer <-> 9Router integration', () => {
             res.write(`data: ${JSON.stringify({ id: 'chatcmpl-sse', choices: [{ delta: { role: 'assistant', content: '' } }] })}\n\n`);
             res.write(`data:${JSON.stringify({ id: 'chatcmpl-sse', choices: [{ delta: { content: 'Reassembled ' } }] })}\n\n`);
             res.write(`data: ${JSON.stringify({ id: 'chatcmpl-sse', choices: [{ delta: { content: 'SSE text!' }, finish_reason: 'stop' }] })}\n\n`);
+            res.write('data: [DONE]\n\n');
+            res.end();
+            return;
+          }
+
+          if (nextMockMode === 'stream-thinking') {
+            res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+            res.write(`data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', reasoning_content: 'Internal reasoning step' } }] })}\n\n`);
+            res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'Final answer' }, finish_reason: 'stop' }] })}\n\n`);
             res.write('data: [DONE]\n\n');
             res.end();
             return;
@@ -305,6 +314,55 @@ describe('ProxyServer <-> 9Router integration', () => {
     expect(transcriptRes.status).toBe(200);
     const transcriptJson: any = await transcriptRes.json();
     expect(transcriptJson.content[0].text).toBe('Hello from 9Router!');
+
+    // 7. Historical /proxy-model turn and thinking blocks are stripped on the next turn ("hi"),
+    //    preserving <system-reminder> without polluting LLM context
+    nextMockMode = 'stream-thinking';
+    const thinkStreamRes = await fetch(`http://127.0.0.1:${proxyPort}/s/sessC/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-5',
+        max_tokens: 1024,
+        stream: true,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: '<system-reminder>Project context reminder</system-reminder>' },
+              { type: 'text', text: '<command-message>proxy-model</command-message>\n<command-name>/proxy-model</command-name>\n<command-args>3</command-args>' },
+            ],
+          },
+          {
+            role: 'assistant',
+            content: [
+              { type: 'text', text: "Switched **this session's** proxy fallback model to `combo` (other sessions and global config unchanged)." },
+            ],
+          },
+          {
+            role: 'user',
+            content: [{ type: 'text', text: 'hi' }],
+          },
+        ],
+      }),
+    });
+    expect(thinkStreamRes.status).toBe(200);
+    const thinkSseText = await thinkStreamRes.text();
+
+    // Native Claude Code thinking block events emitted instead of "💭 Thinking:" text
+    expect(thinkSseText).toContain('"type":"thinking"');
+    expect(thinkSseText).toContain('"type":"thinking_delta","thinking":"Internal reasoning step"');
+    expect(thinkSseText).toContain('"type":"signature_delta","signature":"nscc-thinking"');
+    expect(thinkSseText).not.toContain('💭 Thinking:');
+
+    // And the upstream 9Router request must NOT contain /proxy-model or its assistant reply,
+    // while keeping <system-reminder> attached to "hi"
+    expect(last9RouterReqBody.messages).toEqual([
+      {
+        role: 'user',
+        content: '<system-reminder>Project context reminder</system-reminder>\nhi',
+      },
+    ]);
   });
 
   it('omits tools field instead of sending empty array when all tools are filtered', () => {

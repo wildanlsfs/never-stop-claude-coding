@@ -85,15 +85,23 @@ function ensureClaudeSlashCommands(): void {
       },
     ];
 
+    fs.mkdirSync(commandsDir, { recursive: true });
     for (const entry of commands) {
       const commandFile = path.join(commandsDir, entry.file);
-      if (fs.existsSync(commandFile)) continue;
-      fs.mkdirSync(commandsDir, { recursive: true });
-      fs.writeFileSync(
-        commandFile,
-        ['---', `description: ${entry.desc}`, '---', entry.cmd, ''].join('\n'),
-        'utf-8'
-      );
+      const expectedContent = [
+        '---',
+        `description: ${entry.desc}`,
+        'disable-model-invocation: true',
+        '---',
+        entry.cmd,
+        '',
+      ].join('\n');
+      if (fs.existsSync(commandFile)) {
+        try {
+          if (fs.readFileSync(commandFile, 'utf-8') === expectedContent) continue;
+        } catch {}
+      }
+      fs.writeFileSync(commandFile, expectedContent, 'utf-8');
     }
   } catch {
     // Non-fatal if ~/.claude/commands is not writable
@@ -448,6 +456,7 @@ program
   .description('Run proxy server standalone in background')
   .option('--port <port>', 'Port number')
   .action(async (options) => {
+    ensureClaudeSlashCommands();
     const config = ConfigManager.loadConfig();
     const port = options.port ? parseInt(options.port, 10) : config.proxy.port;
 

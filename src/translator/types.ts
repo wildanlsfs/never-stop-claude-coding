@@ -3,6 +3,17 @@ export interface AnthropicContentBlockText {
   text: string;
 }
 
+export interface AnthropicContentBlockThinking {
+  type: 'thinking';
+  thinking: string;
+  signature?: string;
+}
+
+export interface AnthropicContentBlockRedactedThinking {
+  type: 'redacted_thinking';
+  data: string;
+}
+
 export interface AnthropicContentBlockToolUse {
   type: 'tool_use';
   id: string;
@@ -19,6 +30,8 @@ export interface AnthropicContentBlockToolResult {
 
 export type AnthropicContentBlock =
   | AnthropicContentBlockText
+  | AnthropicContentBlockThinking
+  | AnthropicContentBlockRedactedThinking
   | AnthropicContentBlockToolUse
   | AnthropicContentBlockToolResult;
 

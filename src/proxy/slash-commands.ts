@@ -50,6 +50,99 @@ export class SlashCommandHandler {
     return null;
   }
 
+  public isSlashCommandMessage(msg: any): boolean {
+    if (!msg || msg.role !== 'user') return false;
+    return (
+      this.extractCommandArg(msg, 'proxy-model') !== null ||
+      this.extractCommandArg(msg, 'proxy-account') !== null
+    );
+  }
+
+  /**
+   * Strips historical `/proxy-model` and `/proxy-account` user/assistant turns and
+   * prior `thinking` blocks from `messages` so they never pollute subsequent turns' context,
+   * while preserving any `<system-reminder>` blocks from stripped user turns.
+   */
+  public sanitizeConversationHistory(messages: any[]): any[] {
+    if (!Array.isArray(messages) || messages.length === 0) return messages;
+
+    const cleaned: any[] = [];
+    const pendingReminders: string[] = [];
+
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+      if (!msg) continue;
+
+      if (this.isSlashCommandMessage(msg)) {
+        // Preserve any <system-reminder> blocks attached to this turn (e.g. when /proxy-model was the 1st turn)
+        const rawBlocks: string[] = [];
+        if (typeof msg.content === 'string') {
+          rawBlocks.push(msg.content);
+        } else if (Array.isArray(msg.content)) {
+          for (const b of msg.content) {
+            if (b?.type === 'text' && typeof b.text === 'string') {
+              rawBlocks.push(b.text);
+            }
+          }
+        }
+        for (const text of rawBlocks) {
+          const matches = text.match(/<system-reminder>[\s\S]*?<\/system-reminder>/gi);
+          if (matches) {
+            pendingReminders.push(...matches);
+          }
+        }
+
+        // Skip the paired synthetic assistant reply immediately following this command turn
+        if (i + 1 < messages.length && messages[i + 1]?.role === 'assistant') {
+          i++;
+        }
+        continue;
+      }
+
+      if (msg.role === 'user' && pendingReminders.length > 0) {
+        const reminderBlocks = pendingReminders.splice(0).map((text) => ({ type: 'text', text }));
+        if (typeof msg.content === 'string') {
+          cleaned.push({
+            ...msg,
+            content: [...reminderBlocks, { type: 'text', text: msg.content }],
+          });
+        } else if (Array.isArray(msg.content)) {
+          cleaned.push({
+            ...msg,
+            content: [...reminderBlocks, ...msg.content],
+          });
+        } else {
+          cleaned.push(msg);
+        }
+        continue;
+      }
+
+      if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+        const filteredBlocks = msg.content
+          .filter((b: any) => b?.type !== 'thinking' && b?.type !== 'redacted_thinking')
+          .map((b: any) => {
+            if (b?.type === 'text' && typeof b.text === 'string' && b.text.startsWith('💭 Thinking:\n')) {
+              return {
+                ...b,
+                text: b.text.replace(/^💭 Thinking:\n[\s\S]*?(?:\n\n|$)/, ''),
+              };
+            }
+            return b;
+          })
+          .filter((b: any) => !(b?.type === 'text' && b.text === ''));
+
+        if (filteredBlocks.length > 0) {
+          cleaned.push({ ...msg, content: filteredBlocks });
+        }
+        continue;
+      }
+
+      cleaned.push(msg);
+    }
+
+    return cleaned.length > 0 ? cleaned : messages;
+  }
+
   public handleProxyAccount(req: Request, res: Response, arg: string): void {
     const isStream = Boolean(req.body.stream);
     const requestModel = req.body.model || 'claude-3-5-sonnet-20241022';

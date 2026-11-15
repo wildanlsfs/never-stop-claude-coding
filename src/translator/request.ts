@@ -48,9 +48,15 @@ export function translateAnthropicRequestToOpenAI(
       const toolResults: Array<{ tool_use_id: string; content: string }> = [];
 
       for (const block of msg.content) {
+        if (block.type === 'thinking' || block.type === 'redacted_thinking') {
+          // Follow Claude Code's native thinking concept: do not inject prior thinking blocks
+          // into subsequent turns' chat context.
+          continue;
+        }
         if (block.type === 'text') {
-          if (block.text?.trim()) {
-            textParts.push(block.text);
+          const cleanedText = block.text?.replace(/^💭 Thinking:\n[\s\S]*?(?:\n\n|$)/, '').trim();
+          if (cleanedText) {
+            textParts.push(cleanedText);
           }
         } else if (block.type === 'tool_use') {
           toolCalls.push({

@@ -8,8 +8,7 @@ export class OpenAIToAnthropicSseStream {
   private messageId: string;
 
   private currentBlockIndex = -1;
-  private currentBlockType: 'text' | 'tool_use' | null = null;
-  private currentTextKind: 'reasoning' | 'content' | null = null;
+  private currentBlockType: 'text' | 'thinking' | 'tool_use' | null = null;
   private activeToolIndex: number | null = null;
   private currentToolCallId: string | null = null;
   private currentToolName: string | null = null;
@@ -58,7 +57,6 @@ export class OpenAIToAnthropicSseStream {
       this.closeCurrentBlock();
       this.currentBlockIndex++;
       this.currentBlockType = 'text';
-      this.currentTextKind = 'content';
       this.emitEvent('content_block_start', {
         type: 'content_block_start',
         index: this.currentBlockIndex,
@@ -82,8 +80,8 @@ export class OpenAIToAnthropicSseStream {
     if (delta?.tool_calls && Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) {
       this.hasToolUse = true;
 
-      // If we previously opened a text block, close it cleanly so tool_use is isolated
-      if (this.currentBlockType === 'text') {
+      // If we previously opened a text or thinking block, close it cleanly so tool_use is isolated
+      if (this.currentBlockType === 'text' || this.currentBlockType === 'thinking') {
         this.closeCurrentBlock();
       }
 
@@ -136,42 +134,49 @@ export class OpenAIToAnthropicSseStream {
       }
     }
 
-    // Handle text delta (preserve chain-of-thought reasoning alongside tool calls, but
-    // clearly label and isolate it in its own block so it isn't mistaken for the actual
-    // reply — e.g. a plain "hi" surfacing the model's full deliberation instead of just
-    // its greeting back).
-    const contentChunk = delta?.content;
-    const reasoningChunk = delta?.reasoning_content ?? delta?.thinking ?? delta?.text;
-    const textChunk = contentChunk || reasoningChunk;
-    const textKind: 'reasoning' | 'content' = contentChunk ? 'content' : 'reasoning';
-
-    if (textChunk) {
-      if (this.currentBlockType !== 'text' || this.currentTextKind !== textKind) {
+    // Emit reasoning/thinking using Claude Code's native `thinking` content block
+    // so it renders in Claude Code's collapsible thinking UI and does not pollute chat context.
+    const reasoningChunk = delta?.reasoning_content ?? delta?.thinking;
+    if (reasoningChunk) {
+      if (this.currentBlockType !== 'thinking') {
         this.closeCurrentBlock();
         this.currentBlockIndex++;
-        this.currentBlockType = 'text';
-        this.currentTextKind = textKind;
+        this.currentBlockType = 'thinking';
 
         this.emitEvent('content_block_start', {
           type: 'content_block_start',
           index: this.currentBlockIndex,
-          content_block: { type: 'text', text: '' },
+          content_block: { type: 'thinking', thinking: '', signature: '' },
         });
-
-        if (textKind === 'reasoning') {
-          this.emitEvent('content_block_delta', {
-            type: 'content_block_delta',
-            index: this.currentBlockIndex,
-            delta: { type: 'text_delta', text: '💭 Thinking:\n' },
-          });
-        }
       }
 
       this.outputTokens++;
       this.emitEvent('content_block_delta', {
         type: 'content_block_delta',
         index: this.currentBlockIndex,
-        delta: { type: 'text_delta', text: textChunk },
+        delta: { type: 'thinking_delta', thinking: reasoningChunk },
+      });
+    }
+
+    const contentChunk = delta?.content ?? delta?.text;
+    if (contentChunk) {
+      if (this.currentBlockType !== 'text') {
+        this.closeCurrentBlock();
+        this.currentBlockIndex++;
+        this.currentBlockType = 'text';
+
+        this.emitEvent('content_block_start', {
+          type: 'content_block_start',
+          index: this.currentBlockIndex,
+          content_block: { type: 'text', text: '' },
+        });
+      }
+
+      this.outputTokens++;
+      this.emitEvent('content_block_delta', {
+        type: 'content_block_delta',
+        index: this.currentBlockIndex,
+        delta: { type: 'text_delta', text: contentChunk },
       });
     }
 
@@ -249,12 +254,22 @@ export class OpenAIToAnthropicSseStream {
         });
       }
 
+      if (this.currentBlockType === 'thinking') {
+        this.emitEvent('content_block_delta', {
+          type: 'content_block_delta',
+          index: this.currentBlockIndex,
+          delta: {
+            type: 'signature_delta',
+            signature: 'nscc-thinking',
+          },
+        });
+      }
+
       this.emitEvent('content_block_stop', {
         type: 'content_block_stop',
         index: this.currentBlockIndex,
       });
       this.currentBlockType = null;
-      this.currentTextKind = null;
       this.activeToolIndex = null;
       this.currentToolName = null;
       this.currentToolArgs = '';

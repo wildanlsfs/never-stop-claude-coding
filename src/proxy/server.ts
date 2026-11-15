@@ -122,6 +122,12 @@ export class ProxyServer {
         return;
       }
 
+      // Strip any prior /proxy-model, /proxy-account turns and thinking blocks from conversation history
+      // so they never enter subsequent turns' context.
+      if (Array.isArray(req.body.messages)) {
+        req.body.messages = this.slashCommands.sanitizeConversationHistory(req.body.messages);
+      }
+
       // Check if Direct Fallback Mode is forced (per-session via -f or globally in config)
       const isForceFallback = Boolean(req.nsccForceFallback || config.fallback.forceFallback);
 

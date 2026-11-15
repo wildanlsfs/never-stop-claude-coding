@@ -7,25 +7,31 @@ export function translateOpenAIResponseToAnthropic(openAIRes: any, requestModel:
 
   const content: AnthropicContentBlock[] = [];
 
-  const realContent: string | undefined = message?.content;
-  const reasoningContent: string | undefined = message?.reasoning_content || message?.thinking;
+  let realContent: string | undefined = message?.content;
+  let reasoningContent: string | undefined = message?.reasoning_content || message?.thinking;
   const hasToolCalls = message?.tool_calls && Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
 
-  // Preserve chain-of-thought reasoning (so the model retains context across turns), but
-  // clearly label and separate it from the actual reply — otherwise it reads as if the
-  // model's internal monologue *is* the answer (e.g. a plain "hi" surfacing the model's
-  // full deliberation instead of just its greeting back).
-  const textParts: string[] = [];
+  if (!reasoningContent && typeof realContent === 'string') {
+    const thinkMatch = realContent.match(/^<think>([\s\S]*?)<\/think>\s*/i);
+    if (thinkMatch) {
+      reasoningContent = thinkMatch[1];
+      realContent = realContent.slice(thinkMatch[0].length);
+    }
+  }
+
+  // Emit reasoning as a native Anthropic `thinking` block so Claude Code displays it
+  // in its native collapsible thinking UI instead of polluting the main chat text.
   if (reasoningContent && reasoningContent.trim()) {
-    textParts.push(`💭 Thinking:\n${reasoningContent.trim()}`);
+    content.push({
+      type: 'thinking',
+      thinking: reasoningContent.trim(),
+      signature: 'nscc-thinking',
+    });
   }
   if (realContent && realContent.trim()) {
-    textParts.push(realContent.trim());
-  }
-  if (textParts.length > 0) {
     content.push({
       type: 'text',
-      text: textParts.join('\n\n'),
+      text: realContent.trim(),
     });
   }
 

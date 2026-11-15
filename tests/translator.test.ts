@@ -137,4 +137,54 @@ describe('Anthropic to OpenAI Protocol Translator', () => {
     expect(anthropicRes.content[1].name).toBe('Bash');
     expect(anthropicRes.content[1].input).toEqual({ command: 'pwd' });
   });
+
+  it('emits native Anthropic thinking blocks and excludes them from subsequent turn context', () => {
+    const openAIRes = {
+      id: 'chatcmpl-think-1',
+      choices: [
+        {
+          message: {
+            role: 'assistant',
+            reasoning_content: 'Step 1: analyze user greeting.',
+            content: 'Hello! How can I help?',
+          },
+          finish_reason: 'stop',
+        },
+      ],
+      usage: { prompt_tokens: 10, completion_tokens: 20 },
+    };
+
+    const anthropicRes = translateOpenAIResponseToAnthropic(openAIRes, 'claude-3-5-sonnet-20241022');
+    expect(anthropicRes.content).toEqual([
+      {
+        type: 'thinking',
+        thinking: 'Step 1: analyze user greeting.',
+        signature: 'nscc-thinking',
+      },
+      {
+        type: 'text',
+        text: 'Hello! How can I help?',
+      },
+    ]);
+
+    // Subsequent turn: thinking block must NOT be sent back in OpenAI messages context
+    const nextTurnReq: AnthropicMessagesRequest = {
+      model: 'claude-3-5-sonnet-20241022',
+      messages: [
+        { role: 'user', content: 'Hi' },
+        {
+          role: 'assistant',
+          content: anthropicRes.content,
+        },
+        { role: 'user', content: 'What is 2+2?' },
+      ],
+    };
+
+    const translatedNextTurn = translateAnthropicRequestToOpenAI(nextTurnReq, 'deepseek/deepseek-reasoner');
+    expect(translatedNextTurn.messages).toEqual([
+      { role: 'user', content: 'Hi' },
+      { role: 'assistant', content: 'Hello! How can I help?' },
+      { role: 'user', content: 'What is 2+2?' },
+    ]);
+  });
 });
