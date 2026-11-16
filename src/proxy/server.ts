@@ -100,9 +100,15 @@ export class ProxyServer {
       const sessionId = req.nsccSessionId || 'default';
       const initialSessionModel = req.nsccSessionModel;
       const clientModel = typeof req.body?.model === 'string' ? req.body.model.trim() : '';
-      if (clientModel && !/^claude-/i.test(clientModel) && this.lastClientModels.get(sessionId) !== clientModel) {
-        this.lastClientModels.set(sessionId, clientModel);
-        this.sessionModels.set(sessionId, clientModel);
+      if (clientModel && !/^claude-/i.test(clientModel)) {
+        if (this.lastClientModels.get(sessionId) !== clientModel) {
+          this.lastClientModels.set(sessionId, clientModel);
+          this.sessionModels.set(sessionId, clientModel);
+        }
+      } else if (clientModel && /^claude-/i.test(clientModel) && req.body?.stream && this.lastClientModels.has(sessionId)) {
+        // User switched back from a custom /model picker entry to a built-in Claude model
+        this.lastClientModels.delete(sessionId);
+        this.sessionModels.delete(sessionId);
       }
       const activeFallbackModel = this.sessionModels.get(sessionId) || initialSessionModel || config.fallback.model;
       const isVerbose = config.proxy.verbose;

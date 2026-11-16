@@ -200,6 +200,55 @@ function resolveSessionModel(cliModel?: string): string | undefined {
   return undefined;
 }
 
+async function buildModelPickerArgs(
+  config: ReturnType<typeof ConfigManager.loadConfig>,
+  claudeArgs: string[]
+): Promise<string[]> {
+  if (claudeArgs.some((a) => a === '--settings' || a.startsWith('--settings='))) {
+    return [];
+  }
+  if (!config.fallback.enabled || !config.fallback.baseUrl) {
+    return [];
+  }
+
+  try {
+    const normalized = normalizeOpenAIBaseUrl(config.fallback.baseUrl);
+    const isLocalEndpoint = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(config.fallback.baseUrl.trim());
+    const effectiveApiKey = config.fallback.apiKey || (isLocalEndpoint ? '9router-local' : '');
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (effectiveApiKey) headers['Authorization'] = `Bearer ${effectiveApiKey}`;
+
+    const res = await fetch(`${normalized}/models`, {
+      headers,
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!res.ok) return [];
+
+    const data: any = await res.json();
+    const list: any[] = data.data || data.models || (Array.isArray(data) ? data : []);
+    const ids = Array.from(
+      new Set([
+        ...list.map((m: any) => String(m?.id || m?.name || m)).filter(Boolean),
+        ...(config.fallback.model ? [config.fallback.model] : []),
+      ])
+    );
+
+    if (ids.length === 0) return [];
+
+    const providerLabel = config.fallback.provider.toUpperCase();
+    const options = ids.map((id) => ({
+      model: id,
+      label: id,
+      description: `${providerLabel} proxy model`,
+      behavesAs: 'claude-sonnet-4-6',
+    }));
+
+    return ['--settings', JSON.stringify({ modelPicker: { options } })];
+  } catch {
+    return [];
+  }
+}
+
 // Default action / run command
 program
   .command('run', { isDefault: true })
@@ -228,7 +277,9 @@ program
     const modelPrefix = sessionModel ? `/m/${encodeURIComponent(sessionModel)}` : '';
     const proxyBaseUrl = `http://localhost:${proxyPort}/s/${sessionId}${forcePrefix}${modelPrefix}`;
     ensureClaudeSlashCommands();
-    Logger.log(`nscc starting session ${sessionId} on port ${proxyPort} (forceFallback: ${isSessionForceFallback}, launcher: ${commandToRun}, sessionModel: ${sessionModel ?? 'default'})`);
+    const modelPickerArgs = await buildModelPickerArgs(config, claudeArgs);
+    const effectiveClaudeArgs = [...modelPickerArgs, ...claudeArgs];
+    Logger.log(`nscc starting session ${sessionId} on port ${proxyPort} (forceFallback: ${isSessionForceFallback}, launcher: ${commandToRun}, sessionModel: ${sessionModel ?? 'default'}, pickerModels: ${modelPickerArgs.length > 0 ? 'enabled' : 'none'})`);
 
     const childEnv = {
       ...process.env,
@@ -240,7 +291,7 @@ program
       if (process.stdin.isTTY && typeof process.stdin.pause === 'function') {
         process.stdin.pause();
       }
-      const result = spawnSync(commandToRun, claudeArgs, {
+      const result = spawnSync(commandToRun, effectiveClaudeArgs, {
         stdio: 'inherit',
         env: childEnv,
       });
@@ -258,7 +309,7 @@ program
     if (process.stdin.isTTY && typeof process.stdin.pause === 'function') {
       process.stdin.pause();
     }
-    let result = spawnSync(commandToRun, claudeArgs, {
+    let result = spawnSync(commandToRun, effectiveClaudeArgs, {
       stdio: 'inherit',
       env: childEnv,
     });
