@@ -115,19 +115,14 @@ export function translateAnthropicRequestToOpenAI(
   // 3. Tools Definition & Tool Choice Translation
   let openAITools: OpenAITool[] | undefined;
   if (anthropicReq.tools && anthropicReq.tools.length > 0) {
-    const filteredTools = anthropicReq.tools
-      .filter((t) => !t.name.startsWith('mcp__claude-in-chrome'))
-      .map((t) => ({
-        type: 'function' as const,
-        function: {
-          name: t.name,
-          description: t.description,
-          parameters: t.input_schema ?? { type: 'object', properties: {} },
-        },
-      }));
-    if (filteredTools.length > 0) {
-      openAITools = filteredTools;
-    }
+    openAITools = anthropicReq.tools.map((t) => ({
+      type: 'function' as const,
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: t.input_schema ?? { type: 'object', properties: {} },
+      },
+    }));
   }
 
 

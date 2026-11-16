@@ -400,7 +400,7 @@ describe('ProxyServer <-> 9Router integration', () => {
     expect(last9RouterReqBody.model).toBe('combo');
   });
 
-  it('omits tools field instead of sending empty array when all tools are filtered', () => {
+  it('preserves mcp__claude-in-chrome tools and finishes cleanly with end_turn after tool_result without infinite loop', async () => {
     const req = translateAnthropicRequestToOpenAI(
       {
         model: 'claude-3-5-sonnet-20241022',
@@ -409,6 +409,37 @@ describe('ProxyServer <-> 9Router integration', () => {
       },
       'kr/claude-sonnet-4.5'
     );
-    expect(req.tools).toBeUndefined();
+    expect(req.tools).toHaveLength(1);
+    expect(req.tools![0].function.name).toBe('mcp__claude-in-chrome__navigate');
+
+    // Streaming turn after a tool_result where 9Router returns finish_reason:"stop" must return end_turn
+    // directly instead of looping on synthetic Bash keepalive commands
+    nextMockMode = 'stream-thinking';
+    const postToolRes = await fetch(`http://127.0.0.1:${proxyPort}/s/sessToolDone/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        stream: true,
+        tools: [{ name: 'Bash', input_schema: { type: 'object', properties: { command: { type: 'string' } } } }],
+        messages: [
+          { role: 'user', content: 'Check files' },
+          {
+            role: 'assistant',
+            content: [{ type: 'tool_use', id: 'toolu_map_call_1', name: 'Bash', input: { command: 'ls' } }],
+          },
+          {
+            role: 'user',
+            content: [{ type: 'tool_result', tool_use_id: 'toolu_map_call_1', content: 'README.md' }],
+          },
+        ],
+      }),
+    });
+    expect(postToolRes.status).toBe(200);
+    const postToolSse = await postToolRes.text();
+    expect(postToolSse).toContain('"text":"Final answer"');
+    expect(postToolSse).toContain('"stop_reason":"end_turn"');
+    expect(postToolSse).not.toContain('Auto-continuing task');
   });
 });

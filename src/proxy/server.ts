@@ -322,78 +322,6 @@ export class ProxyServer {
           return;
         }
 
-        // --- Smart Auto-Retry with tool_choice=required if 9Router returns end_turn during tool execution loops ---
-        if (req.body.stream && openAIReq.tools && openAIReq.tools.length > 0 && this.isContinuingToolLoop(req.body.messages)) {
-          const rawBody = await openAIRes.text();
-          const hasToolCall = rawBody.includes('"tool_calls"') || rawBody.includes('"function_call"');
-          const hasEndTurn = rawBody.includes('"finish_reason":"stop"') || rawBody.includes('"finish_reason": "stop"');
-
-          const restream = (bodyText: string) => {
-            const sseStream = new OpenAIToAnthropicSseStream(res, req.body.model);
-            sseStream.init();
-            for (const line of bodyText.split('\n')) {
-              const trimmed = line.trim();
-              if (!trimmed || trimmed.startsWith(':')) continue;
-              if (trimmed.startsWith('data:')) {
-                const payload = trimmed.slice(5).trim();
-                if (payload === '[DONE]') { sseStream.finish('stop'); break; }
-                try { sseStream.processChunk(JSON.parse(payload)); } catch {}
-              }
-            }
-            if (!res.writableEnded) sseStream.finish('stop');
-          };
-
-          const shouldForceToolLoop = hasEndTurn && !hasToolCall;
-
-          if (shouldForceToolLoop) {
-            for (let attempt = 1; attempt <= 3; attempt++) {
-              Logger.log(`🔁 [auto-retry] 9Router returned end_turn with no tool calls — retry ${attempt}/3 with tool_choice=required`);
-              try {
-                const retryRes = await doFetch({ ...openAIReq, tool_choice: 'required' });
-                if (retryRes.ok) {
-                  const retryBody = await retryRes.text();
-                  const retryHasToolCall = retryBody.includes('"tool_calls"') || retryBody.includes('"function_call"');
-                  if (retryHasToolCall) {
-                    Logger.log(`✅ [auto-retry] Retry ${attempt} succeeded — forwarding tool_choice=required response`);
-                    restream(retryBody);
-                    return;
-                  }
-                }
-              } catch (e: any) {
-                Logger.log(`⚠️ [auto-retry] Retry ${attempt} error: ${e.message}`);
-              }
-            }
-
-            // All retries failed — emit a synthetic Bash tool_use to keep session alive in Claude Code CLI
-            const toolId = `toolu_map_Bash_${Date.now()}`;
-            Logger.log(`🔧 [synthetic-continue] Emitting Bash keepalive tool_use (id=${toolId})`);
-            const sseStream = new OpenAIToAnthropicSseStream(res, req.body.model);
-            sseStream.init();
-            sseStream.processChunk({
-              choices: [{
-                delta: {
-                  role: 'assistant',
-                  tool_calls: [{
-                    index: 0,
-                    id: toolId,
-                    type: 'function',
-                    function: {
-                      name: 'Bash',
-                      arguments: JSON.stringify({ command: "echo '[nscc] Auto-continuing task...' && date" }),
-                    },
-                  }],
-                },
-                finish_reason: 'tool_calls',
-              }],
-            });
-            sseStream.finish('stop');
-            return;
-          } else {
-            restream(rawBody);
-            return;
-          }
-        }
-
         if (req.body.stream) {
           const sseStream = new OpenAIToAnthropicSseStream(res, req.body.model);
           sseStream.init();
@@ -542,13 +470,6 @@ export class ProxyServer {
         usage,
       };
     }
-  }
-
-  private isContinuingToolLoop(messages: any): boolean {
-    if (!Array.isArray(messages) || messages.length === 0) return false;
-    const last = messages[messages.length - 1];
-    if (!last || last.role !== 'user' || !Array.isArray(last.content)) return false;
-    return last.content.some((b: any) => b?.type === 'tool_result');
   }
 
   private static readonly SKIP_FORWARD_HEADERS = new Set([

@@ -16,9 +16,6 @@ export class OpenAIToAnthropicSseStream {
   private hasToolUse = false;
   private outputTokens = 0;
   private isFinished = false;
-  private hasExecutedSkillCall = false;
-
-
 
   constructor(res: Response, model: string) {
     this.res = res;
@@ -104,11 +101,7 @@ export class OpenAIToAnthropicSseStream {
           // Format tool call ID deterministically so tool_result responses match original OpenAI ID
           this.currentToolCallId = openAiIdToAnthropic(tc.id);
           this.currentToolArgs = '';
-          let rawName = this.currentToolName || tc.function?.name || 'Bash';
-          if (rawName === 'Skill' || rawName.startsWith('mcp__claude-in-chrome')) {
-            rawName = 'Bash';
-          }
-          const finalToolName = rawName;
+          const finalToolName = this.currentToolName || tc.function?.name || 'Bash';
 
           Logger.log(`🛠️ [tool_use] Opening tool block #${this.currentBlockIndex} (name: "${finalToolName}", id: "${this.currentToolCallId}")`);
 
@@ -187,56 +180,31 @@ export class OpenAIToAnthropicSseStream {
   }
 
   private closeCurrentBlock() {
-
     if (this.currentBlockType !== null) {
       if (this.currentBlockType === 'tool_use') {
         let cleanJson = this.currentToolArgs;
-        let finalName = this.currentToolName || 'Bash';
-        if (finalName === 'Skill') finalName = 'Bash';
-
 
         try {
           const parsed = JSON.parse(this.currentToolArgs);
           if (typeof parsed === 'object' && parsed !== null) {
-            delete parsed.description;
             delete parsed.thought;
             delete parsed.explanation;
             delete parsed.comment;
             delete parsed.reasoning;
 
-            // Convert Skill & mcp__claude-in-chrome tool calls to direct Bash execution so fallback models don't stall in loops
-            if (finalName === 'Skill' || finalName.startsWith('mcp__claude-in-chrome') || parsed.skill || parsed.skill_name) {
-              const skillName = parsed.skill || parsed.skill_name || parsed.name || 'browser-use';
-              const isFirstSkillCall = !this.hasExecutedSkillCall;
-              this.hasExecutedSkillCall = true;
-
-              const cmd = isFirstSkillCall
-                ? 'browser-use open http://127.0.0.1:8123/login && browser-use state'
-                : 'echo "[browser-use] Next steps: use Bash to call browser-use input <index> \\"text\\", browser-use click <index>, browser-use state"';
-
-              cleanJson = JSON.stringify({ command: cmd });
-              Logger.log(`📚 [tool-convert] Converted "${finalName}" tool call to Bash("${cmd}")`);
-              finalName = 'Bash';
-            } else {
-
-
-
-              if (parsed.command && typeof parsed.command === 'string') {
-                // Strip blocking pipes from interactive/stateful CLI tools.
-                // These tools produce output that must be read before deciding the next action,
-                // so piping their output to tail/grep/etc. causes the session to hang.
-                const interactiveToolPattern = /^(browser-use|playwright|puppeteer|selenium|appium)\s+\w+/;
-                if (interactiveToolPattern.test(parsed.command.trim()) && parsed.command.includes('|')) {
-                  parsed.command = parsed.command.replace(/\s*\|.*$/, '').trim();
-                  Logger.log(`🔧 [sanitize] Stripped blocking pipe from interactive tool command`);
-                }
-                // Detach stdio for background commands so child_process doesn't hang Claude Code CLI
-                if (/&\s*$/.test(parsed.command) && !parsed.command.includes('disown') && !parsed.command.includes('</dev/null')) {
-                  parsed.command = parsed.command.replace(/&\s*$/, '</dev/null >/dev/null 2>&1 & disown');
-                }
+            if (parsed.command && typeof parsed.command === 'string') {
+              // Strip blocking pipes from interactive/stateful CLI tools.
+              const interactiveToolPattern = /^(browser-use|playwright|puppeteer|selenium|appium)\s+\w+/;
+              if (interactiveToolPattern.test(parsed.command.trim()) && parsed.command.includes('|')) {
+                parsed.command = parsed.command.replace(/\s*\|.*$/, '').trim();
+                Logger.log(`🔧 [sanitize] Stripped blocking pipe from interactive tool command`);
               }
-              cleanJson = JSON.stringify(parsed);
+              // Detach stdio for background commands so child_process doesn't hang Claude Code CLI
+              if (/&\s*$/.test(parsed.command) && !parsed.command.includes('disown') && !parsed.command.includes('</dev/null')) {
+                parsed.command = parsed.command.replace(/&\s*$/, '</dev/null >/dev/null 2>&1 & disown');
+              }
             }
+            cleanJson = JSON.stringify(parsed);
           }
         } catch {
           cleanJson = this.currentToolArgs;

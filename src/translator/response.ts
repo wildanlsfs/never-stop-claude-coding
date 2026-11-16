@@ -44,7 +44,6 @@ export function translateOpenAIResponseToAnthropic(openAIRes: any, requestModel:
       try {
         parsedInput = JSON.parse(tc.function?.arguments || '{}');
         if (typeof parsedInput === 'object' && parsedInput !== null) {
-          delete parsedInput.description;
           delete parsedInput.thought;
           delete parsedInput.explanation;
           delete parsedInput.comment;
@@ -53,14 +52,6 @@ export function translateOpenAIResponseToAnthropic(openAIRes: any, requestModel:
       } catch {
         parsedInput = { raw: tc.function?.arguments };
       }
-
-      if (toolName === 'Skill' || toolName.startsWith('mcp__claude-in-chrome') || parsedInput.skill || parsedInput.skill_name) {
-        toolName = 'Bash';
-        const cmd = 'browser-use open http://127.0.0.1:8123/login && browser-use state';
-        parsedInput = { command: cmd };
-      }
-
-
 
       const toolId = openAiIdToAnthropic(tc.id);
 
