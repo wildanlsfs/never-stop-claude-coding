@@ -441,5 +441,34 @@ describe('ProxyServer <-> 9Router integration', () => {
     expect(postToolSse).toContain('"text":"Final answer"');
     expect(postToolSse).toContain('"stop_reason":"end_turn"');
     expect(postToolSse).not.toContain('Auto-continuing task');
+
+    // Merged user turn containing a prior local /proxy-model record + a new prompt ("try again")
+    // must NOT be intercepted as /proxy-model, and local-command metadata must be stripped from LLM context.
+    nextMockMode = 'non-stream';
+    const afterLocalRes = await fetch(`http://127.0.0.1:${proxyPort}/s/sessLocal/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 256,
+        stream: false,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: '<command-name>/proxy-model</command-name>\n<command-message>proxy-model</command-message>\n<command-args>Coding</command-args>' },
+              { type: 'text', text: '<local-command-stdout>nscc: Switched this session\'s proxy fallback model to Coding.</local-command-stdout>' },
+              { type: 'text', text: 'try again' },
+            ],
+          },
+        ],
+      }),
+    });
+    expect(afterLocalRes.status).toBe(200);
+    const afterLocalJson: any = await afterLocalRes.json();
+    expect(afterLocalJson.content[0].text).toBe('Hello from 9Router!');
+    expect(last9RouterReqBody.messages).toEqual([
+      { role: 'user', content: 'try again' },
+    ]);
   });
 });

@@ -18,6 +18,10 @@ export class SlashCommandHandler {
     if (typeof lastUserMsg.content === 'string') {
       textBlocks.push(lastUserMsg.content);
     } else if (Array.isArray(lastUserMsg.content)) {
+      // A turn carrying tool_result blocks is a tool continuation, never a standalone slash command.
+      if (lastUserMsg.content.some((b: any) => b?.type === 'tool_result')) {
+        return null;
+      }
       for (const b of lastUserMsg.content) {
         if (b?.type === 'text' && typeof b.text === 'string') {
           textBlocks.push(b.text);
@@ -25,29 +29,47 @@ export class SlashCommandHandler {
       }
     }
 
+    const cleanedBlocks: string[] = [];
+    for (const raw of textBlocks) {
+      // Never intercept Claude Code's auto-mode classifier (<transcript>...) or already-executed local commands (<local-command-stdout>)
+      if (/<local-command-stdout>/i.test(raw) || /<local-command-caveat>/i.test(raw)) {
+        return null;
+      }
+      const cleaned = raw.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, '').trim();
+      if (!cleaned) continue;
+      if (/^<transcript>/i.test(cleaned)) return null;
+      cleanedBlocks.push(cleaned);
+    }
+
+    // Only treat as a slash command if it is the sole non-reminder text block in the turn
+    if (cleanedBlocks.length !== 1) return null;
+    const cleaned = cleanedBlocks[0];
+
     const escaped = commandName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const xmlMsgRegex = new RegExp(`^<command-message>[\\s\\S]*?<command-name>\\s*\\/${escaped}\\s*<\\/command-name>`, 'i');
     const xmlNameRegex = new RegExp(`^<command-name>\\s*\\/${escaped}\\s*<\\/command-name>`, 'i');
     const exactRegex = new RegExp(`^\\/${escaped}(?:\\s+([^\\n]*))?$`, 'i');
 
-    for (const raw of textBlocks) {
-      const cleaned = raw.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, '').trim();
-      if (!cleaned) continue;
-      // Never intercept Claude Code's auto-mode classifier (<transcript>...) even if history mentions slash commands
-      if (/^<transcript>/i.test(cleaned)) return null;
+    if (xmlMsgRegex.test(cleaned) || xmlNameRegex.test(cleaned)) {
+      const argsMatch = cleaned.match(/<command-args>([\s\S]*?)<\/command-args>/i);
+      return (argsMatch?.[1] ?? '').trim();
+    }
 
-      if (xmlMsgRegex.test(cleaned) || xmlNameRegex.test(cleaned)) {
-        const argsMatch = cleaned.match(/<command-args>([\s\S]*?)<\/command-args>/i);
-        return (argsMatch?.[1] ?? '').trim();
-      }
-
-      const exactMatch = cleaned.match(exactRegex);
-      if (exactMatch) {
-        return (exactMatch[1] ?? '').trim();
-      }
+    const exactMatch = cleaned.match(exactRegex);
+    if (exactMatch) {
+      return (exactMatch[1] ?? '').trim();
     }
 
     return null;
+  }
+
+  private isLocalProxyCommandRecordText(text: string): boolean {
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+    if (/^<local-command-caveat>[\s\S]*<\/local-command-caveat>$/i.test(trimmed)) return true;
+    if (/^<local-command-stdout>[\s\S]*<\/local-command-stdout>$/i.test(trimmed)) return true;
+    if (/^<command-(?:name|message)>[\s\S]*?\/?proxy-(?:model|account)[\s\S]*<\/command-(?:name|message|args)>$/i.test(trimmed)) return true;
+    return false;
   }
 
   public isSlashCommandMessage(msg: any): boolean {
@@ -99,21 +121,44 @@ export class SlashCommandHandler {
         continue;
       }
 
-      if (msg.role === 'user' && pendingReminders.length > 0) {
-        const reminderBlocks = pendingReminders.splice(0).map((text) => ({ type: 'text', text }));
-        if (typeof msg.content === 'string') {
-          cleaned.push({
-            ...msg,
-            content: [...reminderBlocks, { type: 'text', text: msg.content }],
+      if (msg.role === 'user') {
+        let updatedMsg = msg;
+        if (Array.isArray(msg.content)) {
+          const filteredUserBlocks = msg.content.filter((b: any) => {
+            if (b?.type === 'text' && typeof b.text === 'string' && this.isLocalProxyCommandRecordText(b.text)) {
+              return false;
+            }
+            return true;
           });
-        } else if (Array.isArray(msg.content)) {
-          cleaned.push({
-            ...msg,
-            content: [...reminderBlocks, ...msg.content],
-          });
-        } else {
-          cleaned.push(msg);
+          if (filteredUserBlocks.length === 0) {
+            continue;
+          }
+          if (filteredUserBlocks.length !== msg.content.length) {
+            updatedMsg = { ...msg, content: filteredUserBlocks };
+          }
+        } else if (typeof msg.content === 'string' && this.isLocalProxyCommandRecordText(msg.content)) {
+          continue;
         }
+
+        if (pendingReminders.length > 0) {
+          const reminderBlocks = pendingReminders.splice(0).map((text) => ({ type: 'text', text }));
+          if (typeof updatedMsg.content === 'string') {
+            cleaned.push({
+              ...updatedMsg,
+              content: [...reminderBlocks, { type: 'text', text: updatedMsg.content }],
+            });
+          } else if (Array.isArray(updatedMsg.content)) {
+            cleaned.push({
+              ...updatedMsg,
+              content: [...reminderBlocks, ...updatedMsg.content],
+            });
+          } else {
+            cleaned.push(updatedMsg);
+          }
+          continue;
+        }
+
+        cleaned.push(updatedMsg);
         continue;
       }
 
